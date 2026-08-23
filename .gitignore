@@ -1,0 +1,17 @@
+/.cache/
+/.idea/
+/.vs/
+/.vscode/
+/.xmake/
+
+/build/
+/vs/
+
+*.7z
+*.log
+*.rar
+*.tar.gz
+*.zip
+CMakeUserPresets.json
+compile_commands.json
+/build_*/

@@ -1,0 +1,289 @@
+#include "PCH.hpp"
+#include "AntiAliasing.hpp"
+#if F4R_HAS_DLSS
+#include "Streamline.hpp"
+#endif
+#if F4R_HAS_XESS
+#include "XeSS.hpp"
+#endif
+#include <Detours.h>
+
+#include <psapi.h>
+#pragma comment(lib, "psapi.lib")
+
+bool g_enbLoaded = false;
+bool g_enbExtractionFailed = false;
+ID3D11Device* g_realDevice = nullptr;
+ID3D11DeviceContext* g_realContext = nullptr;
+
+namespace { std::string GetPluginINIPath(); }
+
+void ExtractRealD3D11()
+{
+	auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
+	if (!rendererData) return;
+
+	auto* wrappedDev = reinterpret_cast<ID3D11Device*>(rendererData->device);
+	auto* wrappedCtx = reinterpret_cast<ID3D11DeviceContext*>(rendererData->context);
+	if (!wrappedDev || !wrappedCtx) return;
+
+	HMODULE enbMod = GetModuleHandleA("d3d11.dll");
+	if (!enbMod) return;
+
+	MODULEINFO enbInfo;
+	if (!GetModuleInformation(GetCurrentProcess(), enbMod, &enbInfo, sizeof(enbInfo))) return;
+
+	void* vtable = *(void**)wrappedDev;
+	uintptr_t enbStart = (uintptr_t)enbMod;
+	uintptr_t enbEnd = enbStart + enbInfo.SizeOfImage;
+	if ((uintptr_t)vtable < enbStart || (uintptr_t)vtable >= enbEnd) return;
+
+	const std::string iniPath = GetPluginINIPath();
+	const std::ptrdiff_t devOffset = GetPrivateProfileIntA("ENB", "DeviceOffset", 0x28, iniPath.c_str());
+	const std::ptrdiff_t ctxOffset = GetPrivateProfileIntA("ENB", "ContextOffset", 0x6C20, iniPath.c_str());
+
+	g_realDevice = *(ID3D11Device**)((char*)wrappedDev + devOffset);
+	g_realContext = *(ID3D11DeviceContext**)((char*)wrappedCtx + ctxOffset);
+
+	if (g_realDevice && g_realContext && g_realDevice != wrappedDev) {
+		REX::LogInformation("ENB D3D11 proxy bypassed (dev+0x{:X}, ctx+0x{:X})", devOffset, ctxOffset);
+	} else {
+		REX::LogWarning("ENB bypass failed - offsets may be wrong for this ENB version");
+		g_realDevice = nullptr;
+		g_realContext = nullptr;
+		g_enbExtractionFailed = true;
+	}
+}
+
+namespace
+{
+	bool IsENBLoaded()
+	{
+		HANDLE process = GetCurrentProcess();
+		HMODULE modules[1024];
+		DWORD needed = 0;
+
+		if (!K32EnumProcessModules(process, modules, sizeof(modules), &needed))
+			return false;
+
+		DWORD count = needed / sizeof(HMODULE);
+		for (DWORD i = 0; i < count; i++) {
+			auto proc = GetProcAddress(modules[i], "ENBGetSDKVersion");
+			if (proc) {
+				using ENBGetSDKVersionFunc = long (*)();
+				long version = reinterpret_cast<ENBGetSDKVersionFunc>(proc)();
+				if ((version / 1000) % 10 == 1) {
+					REX::LogInformation("ENB detected (SDK v{}.{})",
+						version / 1000, version % 1000);
+					return true;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	std::string GetPluginINIPath()
+	{
+		static std::string path;
+		if (path.empty()) {
+			char buf[MAX_PATH];
+			GetModuleFileNameA(GetModuleHandleA(F4R_MODULE_NAME), buf, sizeof(buf));
+			path = buf;
+			path = path.substr(0, path.rfind('\\') + 1);
+			path += F4R_MODULE_NAME;
+			path += ".ini";
+		}
+		return path;
+	}
+
+	int32_t GetConfiguredMode()
+	{
+		return GetPrivateProfileIntA("Settings", "iAAMode", F4R_DEFAULT_AAMODE, GetPluginINIPath().c_str());
+	}
+
+	void CreateDefaultINI()
+	{
+		std::string path = GetPluginINIPath();
+		if (GetFileAttributesA(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+			return;
+
+#if !F4R_HAS_FSR3 && F4R_HAS_DLSS
+
+		std::string content =
+			"[Settings]\n"
+			"; RCAS sharpness - 0.0 = no sharpening, 1.0 = max\n"
+			"; Applied on top, it may interfere with the presets below and thus produce excessive sharpening\n"
+			"fSharpness=0.5\n"
+			"; DLSS preset:\n"
+			";   10 = J (Preset J might exhibit slightly less ghosting at the cost of extra flickering. Preset K is generally recommended over preset J)\n"
+			";   11 = K (Default preset for DLAA mode that is transformer based. Best image quality preset at a higher performance cost)\n"
+			";   12 = L (Delivers a sharper, more stable image with less ghosting than Preset J, K but are more expensive performance wise)\n"
+			";   13 = M (Delivers similar image quality improvements as Preset L but closer in speed to Presets J, K)\n"
+			"iDLSSPreset=11\n"
+			"\n"
+			"[Advanced]\n"
+			"; -0.0001 = default safety net to preserve samplers from being overriden\n"
+			";  0.0    = allowing other mods to override samplers\n"
+			"fAnisotropicMipBias=-0.0001\n";
+
+#elif !F4R_HAS_DLSS && F4R_HAS_FSR3
+
+		std::string content =
+			"[Settings]\n"
+			"; RCAS sharpness - 0.0 = no sharpening, 1.0 = max\n"
+			"fSharpness=0.5\n"
+			"\n"
+			"[Advanced]\n"
+			"; -0.0001 = default safety net to prevent samplers from being overridden\n"
+			";  0.0    = allowing other mods to override samplers\n"
+			"fAnisotropicMipBias=-0.0001\n"
+			"\n"
+			"[ENB]\n"
+			"; ENB D3D11 proxy bypass offsets\n"
+			"; Only change if ENB updates and FSR3 stops working\n"
+			"DeviceOffset=0x28\n"
+			"ContextOffset=0x6C20\n";
+
+#else
+
+		std::string content =
+			"[Settings]\n"
+			"; FSR3 - Nvidia & AMD GPU, DLAA - RTX Only, XeSS - Intel & any GPU\n"
+			"; 1 - FSR3, 2 - DLAA, 3 - XeSS, 0 - Off\n"
+			"iAAMode=1\n"
+			"; RCAS sharpness - 0.0 = no sharpening, 1.0 = max\n"
+			"fSharpness=0.5\n"
+			"; DLSS preset (DLAA mode only):\n"
+			";   10 = J\n"
+			";   11 = K (Default)\n"
+			";   12 = L\n"
+			";   13 = M\n"
+			"iDLSSPreset=11\n"
+			"\n"
+			"[Advanced]\n"
+			"; -0.0001 = default safety net to preserve samplers from being overridden\n"
+			";  0.0    = allowing other mods to override samplers\n"
+			"fAnisotropicMipBias=-0.0001\n"
+			"\n"
+			"[ENB]\n"
+			"; ENB D3D11 proxy bypass offsets\n"
+			"; Only change if ENB updates and FSR3 stops working\n"
+			"DeviceOffset=0x28\n"
+			"ContextOffset=0x6C20\n";
+
+#endif
+
+		HANDLE file = CreateFileA(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (file != INVALID_HANDLE_VALUE) {
+			DWORD written;
+			WriteFile(file, content.c_str(), static_cast<DWORD>(content.size()), &written, nullptr);
+			CloseHandle(file);
+		}
+	}
+
+	void OnF4SEMessage(F4SE::MessagingInterface::Message* a_msg)
+	{
+		switch (a_msg->GetType()) {
+		case F4SE::MessagingInterface::MessageType::kPostLoad:
+			{
+				g_enbLoaded = IsENBLoaded();
+				CreateDefaultINI();
+				F4R_AA::AntiAliasing::GetSingleton().LoadSettings(GetPluginINIPath());
+				F4R_AA::AntiAliasing::GetSingleton().Init();
+				break;
+			}
+		default:
+			break;
+		}
+	}
+}
+
+namespace F4R_AA
+{
+#if F4R_HAS_DLSS
+	using D3D11CreateDeviceAndSwapChainFunc = HRESULT(WINAPI*)(
+		IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
+		const D3D_FEATURE_LEVEL*, UINT, UINT,
+		const DXGI_SWAP_CHAIN_DESC*, IDXGISwapChain**, ID3D11Device**,
+		D3D_FEATURE_LEVEL*, ID3D11DeviceContext**);
+
+	static D3D11CreateDeviceAndSwapChainFunc g_originalD3D11CreateDeviceAndSwapChain = nullptr;
+
+	HRESULT WINAPI Hook_D3D11CreateDeviceAndSwapChain(
+		IDXGIAdapter* a_adapter, D3D_DRIVER_TYPE a_driverType, HMODULE a_software, UINT a_flags,
+		const D3D_FEATURE_LEVEL* a_featureLevels, UINT a_featureLevelsCount, UINT a_sdkVersion,
+		const DXGI_SWAP_CHAIN_DESC* a_swapChainDesc, IDXGISwapChain** a_swapChain, ID3D11Device** a_device,
+		D3D_FEATURE_LEVEL* a_featureLevel, ID3D11DeviceContext** a_immediateContext)
+	{
+		HRESULT hr = g_originalD3D11CreateDeviceAndSwapChain(
+			a_adapter, a_driverType, a_software, a_flags,
+			a_featureLevels, a_featureLevelsCount, a_sdkVersion,
+			a_swapChainDesc, a_swapChain, a_device,
+			a_featureLevel, a_immediateContext);
+
+		if (SUCCEEDED(hr)) {
+			auto& streamline = Streamline::GetSingleton();
+			if (streamline.interposer) {
+				streamline.Initialize();
+
+				if (!g_enbLoaded && streamline.slUpgradeInterface && a_swapChain) {
+					streamline.slUpgradeInterface(reinterpret_cast<void**>(a_swapChain));
+				}
+
+				if (streamline.slSetD3DDevice && a_device && *a_device) {
+					streamline.slSetD3DDevice(*a_device);
+				}
+
+				streamline.CheckFeatures(a_adapter);
+
+				if (streamline.featureDLSS) {
+					streamline.PostDevice();
+				}
+			}
+		}
+
+		return hr;
+	}
+
+	void InstallD3D11Hook()
+	{
+		uintptr_t module = reinterpret_cast<uintptr_t>(GetModuleHandle(nullptr));
+		auto result = Detours::IATHook(
+			module, "d3d11.dll", "D3D11CreateDeviceAndSwapChain",
+			reinterpret_cast<uintptr_t>(&Hook_D3D11CreateDeviceAndSwapChain));
+		g_originalD3D11CreateDeviceAndSwapChain = reinterpret_cast<D3D11CreateDeviceAndSwapChainFunc>(result);
+
+		if (result)
+			REX::LogDebug("D3D11CreateDeviceAndSwapChain IAT hook installed");
+		else
+			REX::LogWarning("D3D11CreateDeviceAndSwapChain IAT hook FAILED");
+	}
+#endif
+}
+
+F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
+{
+	F4SE::InitInfo initInfo;
+	initInfo.logFormat = "%v";
+	F4SE::Init(a_f4se, initInfo);
+
+	REX::LogInformation("F4SE {} & {}", F4SE::GetF4SEVersion(), F4SE::GetRuntimeVersion());
+
+	auto messaging = F4SE::GetMessagingInterface();
+	messaging->RegisterListener(REX::NotNull{ &OnF4SEMessage });
+
+#if F4R_HAS_DLSS
+	if (GetConfiguredMode() == static_cast<int32_t>(F4R_AA::AAMode::DLAA)) {
+		F4R_AA::Streamline::GetSingleton().LoadInterposer();
+		F4R_AA::InstallD3D11Hook();
+	}
+#endif
+#if F4R_HAS_XESS
+	if (GetConfiguredMode() == static_cast<int32_t>(F4R_AA::AAMode::XeSS)) {
+		F4R_AA::XeSS::GetSingleton().Load();
+	}
+#endif
+
+	return true;
+}
