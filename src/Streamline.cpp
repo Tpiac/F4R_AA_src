@@ -82,7 +82,7 @@ namespace F4R_AA
 		slEvaluateFeature = reinterpret_cast<PFun_slEvaluateFeature*>(resolve("slEvaluateFeature"));
 		slAllocateResources = reinterpret_cast<PFun_slAllocateResources*>(resolve("slAllocateResources"));
 		slFreeResources = reinterpret_cast<PFun_slFreeResources*>(resolve("slFreeResources"));
-		slSetTag = reinterpret_cast<PFun_slSetTagLegacy*>(resolve("slSetTag"));
+		slSetTagForFrame = reinterpret_cast<PFun_slSetTagForFrame*>(resolve("slSetTagForFrame"));
 		slGetFeatureRequirements = reinterpret_cast<PFun_slGetFeatureRequirements*>(resolve("slGetFeatureRequirements"));
 		slGetFeatureVersion = reinterpret_cast<PFun_slGetFeatureVersion*>(resolve("slGetFeatureVersion"));
 		slUpgradeInterface = reinterpret_cast<PFun_slUpgradeInterface*>(resolve("slUpgradeInterface"));
@@ -97,7 +97,7 @@ namespace F4R_AA
 			return;
 		}
 
-		static const sl::Feature kFeatures[] = { sl::kFeatureDLSS };
+		static const sl::Feature kFeatures[] = { sl::kFeatureDLSS, sl::kFeaturePCL, sl::kFeatureReflex };
 
 		sl::Preferences pref{};
 		pref.showConsole = false;
@@ -109,9 +109,10 @@ namespace F4R_AA
 		pref.releaseCallback = nullptr;
 		pref.logMessageCallback = &SLLogCallback;
 		pref.flags = sl::PreferenceFlags::eUseManualHooking |
-			sl::PreferenceFlags::eDisableCLStateTracking;
+			sl::PreferenceFlags::eDisableCLStateTracking |
+			sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 		pref.featuresToLoad = kFeatures;
-		pref.numFeaturesToLoad = 1;
+		pref.numFeaturesToLoad = sizeof(kFeatures) / sizeof(kFeatures[0]);
 		pref.applicationId = 0;
 		pref.engine = sl::EngineType::eCustom;
 		pref.engineVersion = "1.0.0";
@@ -143,6 +144,15 @@ namespace F4R_AA
 		adapterInfo.deviceLUID = reinterpret_cast<uint8_t*>(&desc.AdapterLuid);
 		adapterInfo.deviceLUIDSizeInBytes = sizeof(desc.AdapterLuid);
 		adapterInfo.vkPhysicalDevice = nullptr;
+
+		featureReflex = false;
+		nvidiaAdapter = desc.VendorId == 0x10DE;
+		if (nvidiaAdapter && slSetFeatureLoaded) {
+			sl::Result res = slSetFeatureLoaded(sl::kFeatureReflex, true);
+			if (res != sl::Result::eOk) {
+				REX::LogWarning("Could not request NVIDIA Reflex (result={})", static_cast<int>(res));
+			}
+		}
 
 		featureDLSS = false;
 		slIsFeatureLoaded(sl::kFeatureDLSS, featureDLSS);
@@ -176,6 +186,13 @@ namespace F4R_AA
 			slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetOptimalSettings", reinterpret_cast<void*&>(slDLSSGetOptimalSettings));
 			slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSGetState", reinterpret_cast<void*&>(slDLSSGetState));
 			slGetFeatureFunction(sl::kFeatureDLSS, "slDLSSSetOptions", reinterpret_cast<void*&>(slDLSSSetOptions));
+		}
+
+		if (nvidiaAdapter) {
+			bool bound = slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(slReflexSetOptions)) == sl::Result::eOk;
+			bound &= slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(slReflexSleep)) == sl::Result::eOk;
+			featureReflex = bound && slReflexSetOptions && slReflexSleep;
+			REX::LogInformation("NVIDIA Reflex is {}", featureReflex ? "available" : "not available");
 		}
 	}
 
@@ -239,14 +256,79 @@ namespace F4R_AA
 		constants.motionVectorsDilated = sl::Boolean::eTrue;
 		constants.motionVectorsJittered = sl::Boolean::eFalse;
 
-		sl::Result res = slGetNewFrameToken(frameToken, nullptr);
-		if (res != sl::Result::eOk) {
-			REX::LogError("Could not get frame token (result={})", static_cast<int>(res));
+		if (!AcquireFrameToken()) {
+			REX::LogError("Could not get frame token");
+			return;
 		}
 
-		res = slSetConstants(constants, *frameToken, viewport);
+		sl::Result res = slSetConstants(constants, *frameToken, viewport);
 		if (res != sl::Result::eOk) {
 			REX::LogError("Could not set constants (result={})", static_cast<int>(res));
+		}
+	}
+
+	bool Streamline::AcquireFrameToken()
+	{
+		if (!slGetNewFrameToken)
+			return false;
+
+		auto& state = RE::BSGraphics::State::GetSingleton();
+		if (frameToken && frameTokenFrame == state.frameCount)
+			return true;
+
+		sl::Result res = slGetNewFrameToken(frameToken, nullptr);
+		if (res != sl::Result::eOk) {
+			frameToken = nullptr;
+			frameTokenFrame = UINT64_MAX;
+			return false;
+		}
+
+		frameTokenFrame = state.frameCount;
+		return true;
+	}
+
+	void Streamline::UpdateLatency()
+	{
+		if (!initialized || !featureReflex || !slReflexSetOptions || !slReflexSleep)
+			return;
+
+		auto& aa = AntiAliasing::GetSingleton();
+
+		sl::ReflexMode mode = sl::ReflexMode::eOff;
+		uint32_t frameLimitUs = 0;
+
+		if (aa.settings.bEnableReflex && aa.aaEnabled) {
+			mode = aa.settings.bReflexBoost ? sl::ReflexMode::eLowLatencyWithBoost : sl::ReflexMode::eLowLatency;
+			if (aa.settings.bReflexUseFPSLimit)
+				frameLimitUs = static_cast<uint32_t>(1000000.0f / aa.settings.fReflexFPSLimit + 0.5f);
+		}
+
+		if (!reflexOptionsValid || reflexMode != mode || reflexFrameLimitUs != frameLimitUs) {
+			sl::ReflexOptions options{};
+			options.mode = mode;
+			options.frameLimitUs = frameLimitUs;
+			if (slReflexSetOptions(options) != sl::Result::eOk) {
+				REX::LogError("Could not set Reflex options");
+				return;
+			}
+			reflexOptionsValid = true;
+			reflexMode = mode;
+			reflexFrameLimitUs = frameLimitUs;
+		}
+
+		if (mode == sl::ReflexMode::eOff && frameLimitUs == 0)
+			return;
+
+		auto& state = RE::BSGraphics::State::GetSingleton();
+		if (lastReflexFrame == state.frameCount)
+			return;
+		lastReflexFrame = state.frameCount;
+
+		if (AcquireFrameToken()) {
+			sl::Result res = slReflexSleep(*frameToken);
+			if (res != sl::Result::eOk) {
+				REX::LogWarning("Could not submit Reflex sleep (result={})", static_cast<int>(res));
+			}
 		}
 	}
 
@@ -259,6 +341,11 @@ namespace F4R_AA
 		uint32_t a_renderHeight,
 		uint32_t a_qualityMode)
 	{
+		if (!AcquireFrameToken()) {
+			REX::LogError("Could not get frame token");
+			return;
+		}
+
 		UpdateConstants(a_jitterX, a_jitterY);
 
 		auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
@@ -312,9 +399,14 @@ namespace F4R_AA
 			sl::ResourceTag(&motionVectors, sl::kBufferTypeMotionVectors, sl::eOnlyValidNow, &extent),
 		};
 
-		res = slSetTag(viewport, tags, 4, ctx);
+		if (!slSetTagForFrame) {
+			REX::LogError("slSetTagForFrame not found in interposer");
+			return;
+		}
+
+		res = slSetTagForFrame(*frameToken, viewport, tags, 4, ctx);
 		if (res != sl::Result::eOk) {
-			REX::LogError("slSetTag failed (result={})", static_cast<int>(res));
+			REX::LogError("slSetTagForFrame failed (result={})", static_cast<int>(res));
 		}
 
 		const sl::BaseStructure* inputs[] = { &viewport };

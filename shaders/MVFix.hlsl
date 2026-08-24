@@ -27,7 +27,9 @@ float GetScreenDepth(float depth)
 	float2 motionVector = MotionVectorInput[dispatchID.xy];
 	float centerDist = GetScreenDepth(depth);
 
-	if (centerDist > 100.0) {
+	float farFactor = smoothstep(100.0, 250.0, centerDist);
+
+	if (farFactor > 0.0) {
 		float2 mvAccum = 0.0;
 		float totalWeight = 0.0;
 
@@ -50,8 +52,10 @@ float GetScreenDepth(float depth)
 			}
 		}
 
-		if (totalWeight > 0.0)
-			motionVector = mvAccum / totalWeight;
+		if (totalWeight > 0.0) {
+			float2 fixedMotionVector = mvAccum / totalWeight;
+			motionVector = lerp(motionVector, fixedMotionVector, farFactor);
+		}
 	}
 
 	MotionVectorOutput[dispatchID.xy] = motionVector;

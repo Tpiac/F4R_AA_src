@@ -114,6 +114,11 @@ namespace F4R_AA
 		float fSharpness = 0.5f;
 		float fAnisotropicMipBias = -0.0001f;
 		int32_t iDLSSPreset = 11;
+
+		bool bEnableReflex = true;
+		bool bReflexBoost = false;
+		bool bReflexUseFPSLimit = false;
+		float fReflexFPSLimit = 60.0f;
 	};
 
 	struct Texture2D

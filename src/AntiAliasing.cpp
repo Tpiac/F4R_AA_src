@@ -200,14 +200,35 @@ namespace F4R_AA
 		settings.fAnisotropicMipBias = ParseFloat(buf, -0.0001f);
 
 #if F4R_HAS_DLSS
-		Streamline::GetSingleton().preset = static_cast<sl::DLSSPreset>(settings.iDLSSPreset);
+	Streamline::GetSingleton().preset = static_cast<sl::DLSSPreset>(settings.iDLSSPreset);
+
+	GetPrivateProfileStringA("Settings", "bEnableReflex", "1", buf, sizeof(buf), a_iniPath.c_str());
+	settings.bEnableReflex = ParseInt32(buf, 1) != 0;
+
+	GetPrivateProfileStringA("Settings", "bReflexBoost", "0", buf, sizeof(buf), a_iniPath.c_str());
+	settings.bReflexBoost = ParseInt32(buf, 0) != 0;
+
+	GetPrivateProfileStringA("Advanced", "bReflexUseFPSLimit", "0", buf, sizeof(buf), a_iniPath.c_str());
+	settings.bReflexUseFPSLimit = ParseInt32(buf, 0) != 0;
+
+	GetPrivateProfileStringA("Advanced", "fReflexFPSLimit", "60", buf, sizeof(buf), a_iniPath.c_str());
+	float reflexFPSLimit = ParseFloat(buf, 60.0f);
+	if (reflexFPSLimit < 20.0f) reflexFPSLimit = 20.0f;
+	if (reflexFPSLimit > 240.0f) reflexFPSLimit = 240.0f;
+	settings.fReflexFPSLimit = reflexFPSLimit;
 #endif
 
-		const auto mode = static_cast<AAMode>(settings.iAAMode);
-		if (mode == AAMode::DLAA) {
-			REX::LogInformation("Settings loaded - mode=DLAA sharpness={} mipBias={} dlssPreset={}",
-				settings.fSharpness, settings.fAnisotropicMipBias, settings.iDLSSPreset);
-		} else if (mode == AAMode::FSR3) {
+	const auto mode = static_cast<AAMode>(settings.iAAMode);
+	if (mode == AAMode::DLAA) {
+#if F4R_HAS_DLSS
+		REX::LogInformation("Settings loaded - mode=DLAA sharpness={} mipBias={} reflex={} dlssPreset={}",
+			settings.fSharpness, settings.fAnisotropicMipBias,
+			settings.bEnableReflex ? "enabled" : "disabled", settings.iDLSSPreset);
+#else
+		REX::LogInformation("Settings loaded - mode=DLAA sharpness={} mipBias={} dlssPreset={}",
+			settings.fSharpness, settings.fAnisotropicMipBias, settings.iDLSSPreset);
+#endif
+	} else if (mode == AAMode::FSR3) {
 			REX::LogInformation("Settings loaded - mode=FSR3 sharpness={} mipBias={}",
 				settings.fSharpness, settings.fAnisotropicMipBias);
 		} else if (mode == AAMode::XeSS) {
@@ -303,6 +324,12 @@ namespace F4R_AA
 		if ((mode == AAMode::XeSS || mode == AAMode::FSR3 || mode == AAMode::DLAA) && !aaEnabled) {
 			resetHistory = true;
 		}
+
+#if F4R_HAS_DLSS
+		if (mode == AAMode::DLAA) {
+			Streamline::GetSingleton().UpdateLatency();
+		}
+#endif
 
 		if (mode == AAMode::FSR3 && g_enbLoaded && !g_realDevice && !g_enbExtractionFailed) {
 			ExtractRealD3D11();

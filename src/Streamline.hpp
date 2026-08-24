@@ -4,17 +4,25 @@
 
 namespace F4R_AA
 {
-	using PFun_slSetTagLegacy = sl::Result(const sl::ViewportHandle&, const sl::ResourceTag*, uint32_t, sl::CommandBuffer*);
+	using PFun_slSetTagForFrame = sl::Result(const sl::FrameToken&, const sl::ViewportHandle&, const sl::ResourceTag*, uint32_t, sl::CommandBuffer*);
 
 	struct Streamline
 	{
 		bool initialized = false;
 		bool featureDLSS = false;
+		bool featureReflex = false;
+		bool nvidiaAdapter = false;
 
 		HMODULE interposer = nullptr;
 
 		sl::FrameToken* frameToken = nullptr;
+		uint64_t frameTokenFrame = UINT64_MAX;
 		sl::ViewportHandle viewport = sl::ViewportHandle(0);
+
+		bool reflexOptionsValid = false;
+		sl::ReflexMode reflexMode = sl::ReflexMode::eOff;
+		uint32_t reflexFrameLimitUs = 0;
+		uint32_t lastReflexFrame = UINT32_MAX;
 
 		sl::DLSSPreset preset = sl::DLSSPreset::ePresetK;
 
@@ -26,7 +34,7 @@ namespace F4R_AA
 		PFun_slEvaluateFeature* slEvaluateFeature = nullptr;
 		PFun_slAllocateResources* slAllocateResources = nullptr;
 		PFun_slFreeResources* slFreeResources = nullptr;
-		PFun_slSetTagLegacy* slSetTag = nullptr;
+		PFun_slSetTagForFrame* slSetTagForFrame = nullptr;
 		PFun_slGetFeatureRequirements* slGetFeatureRequirements = nullptr;
 		PFun_slGetFeatureVersion* slGetFeatureVersion = nullptr;
 		PFun_slUpgradeInterface* slUpgradeInterface = nullptr;
@@ -40,6 +48,9 @@ namespace F4R_AA
 		PFun_slDLSSGetState* slDLSSGetState = nullptr;
 		PFun_slDLSSSetOptions* slDLSSSetOptions = nullptr;
 
+		PFun_slReflexSetOptions* slReflexSetOptions = nullptr;
+		PFun_slReflexSleep* slReflexSleep = nullptr;
+
 		[[nodiscard]] static Streamline& GetSingleton();
 
 		Streamline(const Streamline&) = delete;
@@ -50,6 +61,9 @@ namespace F4R_AA
 		void CheckFeatures(IDXGIAdapter* a_adapter);
 		void PostDevice();
 		void DestroyDLSSResources();
+
+		bool AcquireFrameToken();
+		void UpdateLatency();
 
 		void UpdateConstants(float a_jitterX, float a_jitterY);
 

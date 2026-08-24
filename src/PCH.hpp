@@ -7,6 +7,7 @@
 
 #include <sl.h>
 #include <sl_dlss.h>
+#include <sl_reflex.h>
 
 // FSR3 SDK
 #include <FidelityFX/host/ffx_fsr3.h>
