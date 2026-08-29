@@ -41,7 +41,7 @@ namespace F4R_AA
 
 		std::unique_ptr<Texture2D> workingTexture;
 		std::unique_ptr<Texture2D> motionVectorTexture;
-		std::unique_ptr<Texture2D> sharpenTexture;
+		std::unique_ptr<Texture2D> tempTexture;
 		ID3D11ComputeShader* mvFixShader = nullptr;
 		ID3D11Buffer* mvFixCB = nullptr;
 		ID3D11ComputeShader* rcasShader = nullptr;
@@ -74,6 +74,7 @@ namespace F4R_AA
 		uint32_t cachedHeight = 0;
 		DXGI_FORMAT cachedFormat = DXGI_FORMAT_UNKNOWN;
 		int32_t cachedMode = -1;
+		float cachedSharpness = -1.0f;
 
 		int startupFrameGuard = 0;
 	};

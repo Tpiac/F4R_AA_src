@@ -333,8 +333,9 @@ namespace F4R_AA
 	}
 
 	void Streamline::Evaluate(
-		Texture2D* a_color,
-		Texture2D* a_motionVectors,
+		ID3D11Resource* a_colorResource,
+		ID3D11ShaderResourceView* a_colorSRV,
+		ID3D11Resource* a_motionVectorsResource,
 		float a_jitterX,
 		float a_jitterY,
 		uint32_t a_renderWidth,
@@ -361,9 +362,9 @@ namespace F4R_AA
 		else if (a_qualityMode == 4) mode = sl::DLSSMode::eUltraPerformance;
 
 		bool isHDR = false;
-		if (a_color->srv) {
+		if (a_colorSRV) {
 			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
-			a_color->srv->GetDesc(&srvDesc);
+			a_colorSRV->GetDesc(&srvDesc);
 			isHDR = srvDesc.Format == DXGI_FORMAT_R11G11B10_FLOAT ||
 				srvDesc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT ||
 				srvDesc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -385,18 +386,18 @@ namespace F4R_AA
 			REX::LogCritical("Could not enable DLSS (result={})", static_cast<int>(res));
 		}
 
-		sl::Resource colorIn(sl::ResourceType::eTex2d, a_color->resource);
-		sl::Resource colorOut(sl::ResourceType::eTex2d, a_color->resource);
+		sl::Resource colorIn(sl::ResourceType::eTex2d, a_colorResource);
+		sl::Resource colorOut(sl::ResourceType::eTex2d, a_colorResource);
 		sl::Resource depth(sl::ResourceType::eTex2d, reinterpret_cast<void*>(rendererData->depthStencilTargets[2].texture));
-		sl::Resource motionVectors(sl::ResourceType::eTex2d, a_motionVectors->resource);
+		sl::Resource motionVectors(sl::ResourceType::eTex2d, a_motionVectorsResource);
 
 		sl::Extent extent{ 0, 0, a_renderWidth, a_renderHeight };
 
 		sl::ResourceTag tags[] = {
 			sl::ResourceTag(&colorIn, sl::kBufferTypeScalingInputColor, sl::eOnlyValidNow, &extent),
 			sl::ResourceTag(&colorOut, sl::kBufferTypeScalingOutputColor, sl::eOnlyValidNow, &extent),
-			sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::eOnlyValidNow, &extent),
-			sl::ResourceTag(&motionVectors, sl::kBufferTypeMotionVectors, sl::eOnlyValidNow, &extent),
+			sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::eValidUntilPresent, &extent),
+			sl::ResourceTag(&motionVectors, sl::kBufferTypeMotionVectors, sl::eValidUntilPresent, &extent),
 		};
 
 		if (!slSetTagForFrame) {

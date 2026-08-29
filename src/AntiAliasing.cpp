@@ -484,6 +484,11 @@ namespace F4R_AA
 		if (mode == AAMode::DLAA) {
 			auto& streamline = Streamline::GetSingleton();
 
+			if (!workingTexture || !workingTexture->resource || !workingTexture->srv) {
+				backBufferResource->Release();
+				return;
+			}
+
 			if (motionVectorTexture && motionVectorTexture->resource &&
 				motionVectorTexture->uav && motionVectorTexture->srv &&
 				mvFixShader && mvFixCB) {
@@ -516,15 +521,14 @@ namespace F4R_AA
 			}
 
 			streamline.Evaluate(
-				workingTexture.get(),
-				motionVectorTexture.get(),
+				workingTexture->resource,
+				workingTexture->srv,
+				motionVectorTexture ? motionVectorTexture->resource : nullptr,
 				jitterX, jitterY, renderW, renderH, 0);
 			resetHistory = false;
 
-			Texture2D* finalTexture = workingTexture.get();
-
-			if (settings.fSharpness > 0.0f && sharpenTexture && sharpenTexture->resource &&
-				sharpenTexture->uav && rcasShader && rcasCB && workingTexture->srv) {
+			if (settings.fSharpness > 0.0f && tempTexture && tempTexture->resource &&
+				tempTexture->uav && rcasShader && rcasCB && workingTexture->srv) {
 
 				float sharpness = settings.fSharpness;
 				if (sharpness < 0.0f) sharpness = 0.0f;
@@ -535,13 +539,13 @@ namespace F4R_AA
 				ctx->UpdateSubresource(rcasCB, 0, nullptr, &constants, 0, 0);
 
 				ID3D11ShaderResourceView* srvs[1] = { workingTexture->srv };
-				RunComputePass(ctx, rcasShader, rcasCB, srvs, 1, sharpenTexture->uav,
+				RunComputePass(ctx, rcasShader, rcasCB, srvs, 1, tempTexture->uav,
 					(state.screenWidth + 7) / 8, (state.screenHeight + 7) / 8);
 
-				finalTexture = sharpenTexture.get();
+				ctx->CopyResource(backBufferResource, tempTexture->resource);
+			} else {
+				ctx->CopyResource(backBufferResource, workingTexture->resource);
 			}
-
-			ctx->CopyResource(backBufferResource, reinterpret_cast<ID3D11Resource*>(finalTexture->resource));
 		}
 #endif
 #if F4R_HAS_FSR3
@@ -583,25 +587,25 @@ namespace F4R_AA
 				xessOutputTexture.get(),
 				jitterX, jitterY, renderW, renderH, reset);
 
-			if (settings.fSharpness > 0.0f && sharpenTexture && sharpenTexture->uav &&
+if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 				xessOutputTexture && xessOutputTexture->srv && rcasShader && rcasCB) {
 
-				float sharpness = settings.fSharpness;
-				if (sharpness < 0.0f) sharpness = 0.0f;
-				if (sharpness > 1.0f) sharpness = 1.0f;
+			float sharpness = settings.fSharpness;
+			if (sharpness < 0.0f) sharpness = 0.0f;
+			if (sharpness > 1.0f) sharpness = 1.0f;
 
-				RCASConstants constants{};
-				constants.sharpness = 0.25f + 0.75f * powf(sharpness, 0.2f);
-				ctx->UpdateSubresource(rcasCB, 0, nullptr, &constants, 0, 0);
+			RCASConstants constants{};
+			constants.sharpness = 0.25f + 0.75f * powf(sharpness, 0.2f);
+			ctx->UpdateSubresource(rcasCB, 0, nullptr, &constants, 0, 0);
 
-				ID3D11ShaderResourceView* srvs[1] = { xessOutputTexture->srv };
-				RunComputePass(ctx, rcasShader, rcasCB, srvs, 1, sharpenTexture->uav,
-					(state.screenWidth + 7) / 8, (state.screenHeight + 7) / 8);
+			ID3D11ShaderResourceView* srvs[1] = { xessOutputTexture->srv };
+			RunComputePass(ctx, rcasShader, rcasCB, srvs, 1, tempTexture->uav,
+				(state.screenWidth + 7) / 8, (state.screenHeight + 7) / 8);
 
-				ctx->CopyResource(backBufferResource, sharpenTexture->resource);
-			} else {
-				ctx->CopyResource(backBufferResource, xessOutputTexture->resource);
-			}
+			ctx->CopyResource(backBufferResource, tempTexture->resource);
+		} else {
+			ctx->CopyResource(backBufferResource, xessOutputTexture->resource);
+		}
 		}
 #endif
 
@@ -680,15 +684,15 @@ namespace F4R_AA
 		}
 
 		if (resourcesCreated) {
-			if (cachedWidth == state.screenWidth && cachedHeight == state.screenHeight && cachedFormat == backBufferFormat && cachedMode == settings.iAAMode) {
+			if (cachedWidth == state.screenWidth && cachedHeight == state.screenHeight && cachedFormat == backBufferFormat && cachedMode == settings.iAAMode && cachedSharpness == settings.fSharpness) {
 				return;
 			}
-			REX::LogInformation("CheckResources - mode/resolution/format changed {}x{} fmt{} mode{} -> {}x{} fmt{} mode{} - recreating",
-				cachedWidth, cachedHeight, static_cast<int>(cachedFormat), cachedMode,
-				state.screenWidth, state.screenHeight, static_cast<int>(backBufferFormat), settings.iAAMode);
-			workingTexture.reset();
+			REX::LogInformation("CheckResources - mode/resolution/format/sharpness changed {}x{} fmt{} mode{} sharp{} -> {}x{} fmt{} mode{} sharp{} - recreating",
+				cachedWidth, cachedHeight, static_cast<int>(cachedFormat), cachedMode, cachedSharpness,
+				state.screenWidth, state.screenHeight, static_cast<int>(backBufferFormat), settings.iAAMode, settings.fSharpness);
 			motionVectorTexture.reset();
-			sharpenTexture.reset();
+			tempTexture.reset();
+			workingTexture.reset();
 #if F4R_HAS_FSR3
 			fidelityFX.reset();
 #endif
@@ -708,6 +712,9 @@ namespace F4R_AA
 #endif
 			if (mvFixCB) { mvFixCB->Release(); mvFixCB = nullptr; }
 			if (rcasCB) { rcasCB->Release(); rcasCB = nullptr; }
+			if (mvFixShader) { mvFixShader->Release(); mvFixShader = nullptr; }
+			if (rcasShader) { rcasShader->Release(); rcasShader = nullptr; }
+			if (depthCopyShader) { depthCopyShader->Release(); depthCopyShader = nullptr; }
 			resourcesCreated = false;
 		}
 
@@ -715,7 +722,30 @@ namespace F4R_AA
 
 		REX::LogDebug("CheckResources - creating resources (mode={})", settings.iAAMode);
 
-		if (!workingTexture) {
+#if F4R_HAS_FSR3
+		if (mode == AAMode::FSR3 && !workingTexture) {
+			workingTexture = std::make_unique<Texture2D>();
+			D3D11_TEXTURE2D_DESC texDesc = {};
+			texDesc.Width = state.screenWidth;
+			texDesc.Height = state.screenHeight;
+			texDesc.MipLevels = 1;
+			texDesc.ArraySize = 1;
+			texDesc.Format = backBufferFormat;
+			texDesc.SampleDesc.Count = 1;
+			texDesc.Usage = D3D11_USAGE_DEFAULT;
+			texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_RENDER_TARGET;
+			HRESULT hr = device->CreateTexture2D(&texDesc, nullptr, &workingTexture->resource);
+			if (FAILED(hr)) {
+				REX::LogError("CreateTexture2D(workingTexture) failed hr=0x{:x}", static_cast<uint32_t>(hr));
+				workingTexture.reset();
+				return;
+			}
+			REX::LogDebug("workingTexture {}x{} fmt={}", texDesc.Width, texDesc.Height, static_cast<int>(backBufferFormat));
+		}
+#endif
+
+#if F4R_HAS_DLSS
+		if (mode == AAMode::DLAA && !workingTexture) {
 			workingTexture = std::make_unique<Texture2D>();
 			D3D11_TEXTURE2D_DESC texDesc = {};
 			texDesc.Width = state.screenWidth;
@@ -726,30 +756,27 @@ namespace F4R_AA
 			texDesc.SampleDesc.Count = 1;
 			texDesc.Usage = D3D11_USAGE_DEFAULT;
 			texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-#if F4R_HAS_FSR3
-			if (mode == AAMode::FSR3) {
-				texDesc.BindFlags |= D3D11_BIND_RENDER_TARGET;
-			}
-#endif
 			HRESULT hr = device->CreateTexture2D(&texDesc, nullptr, &workingTexture->resource);
 			if (FAILED(hr)) {
 				REX::LogError("CreateTexture2D(workingTexture) failed hr=0x{:x}", static_cast<uint32_t>(hr));
 				workingTexture.reset();
 				return;
 			}
-			REX::LogDebug("workingTexture {}x{} fmt={}", texDesc.Width, texDesc.Height, static_cast<int>(backBufferFormat));
-		}
 
-#if F4R_HAS_DLSS || F4R_HAS_XESS
-		if (mode == AAMode::DLAA || mode == AAMode::XeSS) {
-			if (!rcasCB) {
-				rcasCB = CreateConstantBuffer(device, "rcasCB", sizeof(RCASConstants));
-			}
-			if (!rcasShader) {
-				rcasShader = CreateComputeShaderFromBytecode(kRCAS, kRCASSize, device);
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Format = typedFormat;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = 1;
+			hr = device->CreateShaderResourceView(workingTexture->resource, &srvDesc, &workingTexture->srv);
+			if (FAILED(hr)) {
+				REX::LogError("CreateShaderResourceView(workingTexture) failed hr=0x{:x}", static_cast<uint32_t>(hr));
+			} else {
+				REX::LogDebug("workingTexture {}x{} fmt={}", texDesc.Width, texDesc.Height, static_cast<int>(backBufferFormat));
 			}
 		}
 #endif
+
+
 
 #if F4R_HAS_DLSS
 		if (mode == AAMode::DLAA) {
@@ -804,19 +831,16 @@ namespace F4R_AA
 				mvFixShader = CreateComputeShaderFromBytecode(kMVFix, kMVFixSize, device);
 			}
 
-			if (workingTexture && workingTexture->resource && !workingTexture->srv) {
-				D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
-				srvDesc.Format = typedFormat;
-				srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-				srvDesc.Texture2D.MipLevels = 1;
-				HRESULT hr = device->CreateShaderResourceView(workingTexture->resource, &srvDesc, &workingTexture->srv);
-				if (FAILED(hr)) {
-					REX::LogError("CreateShaderResourceView(workingTexture) failed hr=0x{:x}", static_cast<uint32_t>(hr));
+			if (settings.fSharpness > 0.0f) {
+				if (!rcasCB) {
+					rcasCB = CreateConstantBuffer(device, "rcasCB", sizeof(RCASConstants));
 				}
-			}
-
-			if (!sharpenTexture) {
-				sharpenTexture = CreateSharpenTexture(device, state.screenWidth, state.screenHeight, backBufferFormat, typedFormat);
+				if (!rcasShader) {
+					rcasShader = CreateComputeShaderFromBytecode(kRCAS, kRCASSize, device);
+				}
+				if (!tempTexture) {
+					tempTexture = CreateSharpenTexture(device, state.screenWidth, state.screenHeight, backBufferFormat, typedFormat);
+				}
 			}
 		}
 #endif
@@ -893,8 +917,16 @@ namespace F4R_AA
 				}
 			}
 
-			if (!sharpenTexture) {
-				sharpenTexture = CreateSharpenTexture(device, width, height, backBufferFormat, typedFormat);
+			if (settings.fSharpness > 0.0f) {
+				if (!tempTexture) {
+					tempTexture = CreateSharpenTexture(device, width, height, backBufferFormat, typedFormat);
+				}
+				if (!rcasCB) {
+					rcasCB = CreateConstantBuffer(device, "rcasCB", sizeof(RCASConstants));
+				}
+				if (!rcasShader) {
+					rcasShader = CreateComputeShaderFromBytecode(kRCAS, kRCASSize, device);
+				}
 			}
 
 			if (!depthCopyShader) {
@@ -915,5 +947,6 @@ namespace F4R_AA
 		cachedHeight = state.screenHeight;
 		cachedFormat = backBufferFormat;
 		cachedMode = settings.iAAMode;
+		cachedSharpness = settings.fSharpness;
 	}
 }

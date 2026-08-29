@@ -68,8 +68,9 @@ namespace F4R_AA
 		void UpdateConstants(float a_jitterX, float a_jitterY);
 
 		void Evaluate(
-			Texture2D* a_color,
-			Texture2D* a_motionVectors,
+			ID3D11Resource* a_colorResource,
+			ID3D11ShaderResourceView* a_colorSRV,
+			ID3D11Resource* a_motionVectorsResource,
 			float a_jitterX,
 			float a_jitterY,
 			uint32_t a_renderWidth,
