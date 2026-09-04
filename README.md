@@ -6,7 +6,7 @@ Upscaling mod for Fallout 4:
 - FSR 3.1.5
 - XeSS
 
-This is the combined development repo and builds F4R_Upscaling.dll, DLSS.dll, FSR3.dll
+This is the combined development repo and builds F4R_Upscaling.dll, DLSS.dll, FSR3.dll, XeSS.dll
 
 - Fallout 4 (OG/NG/AE)
 - [F4SE](https://f4se.silverlock.org)
@@ -51,3 +51,8 @@ FSR3 standalone:
 
 cmake -B build_fsr3 -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCOMMONLIB_PLUGIN_NAME=FSR3
 cmake --build build_fsr3 --config Release
+
+XeSS standalone:
+
+cmake -B build_xess -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCOMMONLIB_PLUGIN_NAME=XeSS
+cmake --build build_xess --config Release

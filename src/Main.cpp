@@ -162,6 +162,26 @@ namespace
 			"DeviceOffset=0x28\n"
 			"ContextOffset=0x6C20\n";
 
+#elif !F4R_HAS_DLSS && !F4R_HAS_FSR3 && F4R_HAS_XESS
+
+		std::string content =
+			"[Settings]\n"
+			"; RCAS sharpness - 0.0 = no sharpening, 1.0 = max\n"
+			"fSharpness=0.5\n"
+			"; 0 = Native (XeSS 1.0x, default), 1 = Quality (0.66x, 1.5x), 2 = Balanced (0.58x, 1.7x), 3 = Performance (0.5x, 2x)\n"
+			"; ENB forces Native\n"
+			"iQualityMode=0\n"
+			"\n"
+			"[Advanced]\n"
+			"; -0.0001 = default safety net to prevent samplers from being overridden\n"
+			";  0.0    = allowing other mods to override samplers\n"
+			"fAnisotropicMipBias=-0.0001\n"
+			"\n"
+			"[ENB]\n"
+			"; ENB D3D11 proxy bypass offsets (FSR3 & XeSS)\n"
+			"DeviceOffset=0x28\n"
+			"ContextOffset=0x6C20\n";
+
 #else
 
 		std::string content =
