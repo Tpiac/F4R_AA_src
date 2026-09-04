@@ -13,8 +13,12 @@
 #ifndef F4R_HAS_XESS
 	#define F4R_HAS_XESS 1
 #endif
-#ifndef F4R_DEFAULT_AAMODE
-	#define F4R_DEFAULT_AAMODE 1
+#ifndef F4R_DEFAULT_Method
+	#ifdef F4R_DEFAULT_AAMODE
+		#define F4R_DEFAULT_Method F4R_DEFAULT_AAMODE
+	#else
+		#define F4R_DEFAULT_Method 1
+	#endif
 #endif
 
 #define F4R_STRINGIFY_IMPL(x) #x
@@ -25,7 +29,7 @@ namespace RE::BSGraphics
 	class RenderTargetManager;
 }
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	inline bool IsAE()
 	{
@@ -87,7 +91,13 @@ namespace F4R_AA
 		{
 			kFrameBuffer = 0,
 			kMainTemp = 4,
+			kSSRRaw = 7,
+			kSSRBlurred = 8,
+			kSSRBlurredExtra = 9,
+			kSSRDirection = 10,
+			kSSRMask = 11,
 			kMotionVectors = 29,
+			kMainDepthMips = 39,
 		};
 	}
 
@@ -99,21 +109,22 @@ namespace F4R_AA
 		};
 	}
 
-	enum class AAMode : int32_t
+	enum class Method: int32_t
 	{
 		Off = 0,
 		FSR3 = 1,
-		DLAA = 2,
+		DLSS = 2,
 		XeSS = 3
 	};
 
 	struct Settings
 	{
-		int32_t iAAMode = F4R_DEFAULT_AAMODE;
+		int32_t iMethod = F4R_DEFAULT_Method;
 
 		float fSharpness = 0.5f;
 		float fAnisotropicMipBias = -0.0001f;
 		int32_t iDLSSPreset = 11;
+		int32_t iQualityMode = 0;
 
 		bool bEnableReflex = true;
 		bool bReflexBoost = false;
@@ -172,7 +183,7 @@ extern ID3D11DeviceContext* g_realContext;
 
 void ExtractRealD3D11();
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	inline SamplerStates* GetGlobalSamplers()
 	{

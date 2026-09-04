@@ -2,7 +2,7 @@
 
 #if F4R_HAS_DLSS
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	using PFun_slSetTagForFrame = sl::Result(const sl::FrameToken&, const sl::ViewportHandle&, const sl::ResourceTag*, uint32_t, sl::CommandBuffer*);
 

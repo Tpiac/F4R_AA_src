@@ -1,6 +1,6 @@
 #include "PCH.hpp"
 #include "FidelityFX.hpp"
-#include "AntiAliasing.hpp"
+#include "Upscaling.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -8,7 +8,7 @@
 
 #if F4R_HAS_FSR3
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	namespace
 	{
@@ -58,14 +58,14 @@ namespace F4R_AA
 		DXGI_FORMAT backBufferFormat)
 	{
 		if (fsrScratchBuffer) {
-			REX::LogWarning("CreateFSRResources - already created, skipping");
+			REX::LogWarning("CreateFSRResources: already created, skipping");
 			return true;
 		}
 
 		size_t scratchSize = ffxGetScratchMemorySizeDX11(FFX_FSR3UPSCALER_CONTEXT_COUNT);
 		fsrScratchBuffer = std::calloc(scratchSize, 1);
 		if (!fsrScratchBuffer) {
-			REX::LogError("CreateFSRResources - calloc failed");
+			REX::LogError("CreateFSRResources: calloc failed");
 			return false;
 		}
 
@@ -76,7 +76,7 @@ namespace F4R_AA
 			scratchSize,
 			FFX_FSR3UPSCALER_CONTEXT_COUNT);
 		if (err != FFX_OK) {
-			REX::LogError("CreateFSRResources - ffxGetInterfaceDX11 failed error={}", static_cast<int>(err));
+			REX::LogError("CreateFSRResources: ffxGetInterfaceDX11 failed error={}", static_cast<int>(err));
 			std::free(fsrScratchBuffer);
 			fsrScratchBuffer = nullptr;
 			return false;
@@ -99,10 +99,10 @@ namespace F4R_AA
 				texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 				colorOpaqueOnlyTexture = std::make_unique<Texture2D>();
 				if (FAILED(device->CreateTexture2D(&texDesc, nullptr, &colorOpaqueOnlyTexture->resource))) {
-					REX::LogError("CreateFSRResources - colorOpaqueOnly failed");
+					REX::LogError("CreateFSRResources: colorOpaqueOnly failed");
 					colorOpaqueOnlyTexture.reset();
 				} else {
-					REX::LogDebug("CreateFSRResources - colorOpaqueOnly {}x{} fmt={}",
+					REX::LogDebug("CreateFSRResources: colorOpaqueOnly {}x{} fmt={}",
 						texDesc.Width, texDesc.Height, static_cast<int>(texDesc.Format));
 				}
 			}
@@ -119,10 +119,10 @@ namespace F4R_AA
 				texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
 				reactiveMaskTexture = std::make_unique<Texture2D>();
 				if (FAILED(device->CreateTexture2D(&texDesc, nullptr, &reactiveMaskTexture->resource))) {
-					REX::LogError("CreateFSRResources - reactiveMask failed");
+					REX::LogError("CreateFSRResources: reactiveMask failed");
 					reactiveMaskTexture.reset();
 				} else {
-					REX::LogDebug("CreateFSRResources - reactiveMask {}x{}", texDesc.Width, texDesc.Height);
+					REX::LogDebug("CreateFSRResources: reactiveMask {}x{}", texDesc.Width, texDesc.Height);
 				}
 			}
 		}
@@ -138,12 +138,12 @@ namespace F4R_AA
 		contextDesc.fpMessage = nullptr;
 		contextDesc.backBufferFormat = ffxGetSurfaceFormatDX11(backBufferFormat);
 
-		REX::LogDebug("CreateFSRResources - flags=0x{:x} size={}x{} fmt={}",
+		REX::LogDebug("CreateFSRResources: flags=0x{:x} size={}x{} fmt={}",
 			contextDesc.flags, backBufferWidth, backBufferHeight, static_cast<int>(backBufferFormat));
 
 		err = ffxFsr3ContextCreate(&fsrContext, &contextDesc);
 		if (err != FFX_OK) {
-			REX::LogError("CreateFSRResources - ffxFsr3ContextCreate failed error={} (0x{:x})",
+			REX::LogError("CreateFSRResources: ffxFsr3ContextCreate failed error={} (0x{:x})",
 				static_cast<int>(err), static_cast<int>(err));
 			std::free(fsrScratchBuffer);
 			fsrScratchBuffer = nullptr;
@@ -179,7 +179,7 @@ namespace F4R_AA
 		auto* ctx = GetImmediateContext();
 		if (!ctx) return;
 
-		auto& aa = AntiAliasing::GetSingleton();
+		auto& aa = Upscaling::GetSingleton();
 
 		if (!s_frameTimerInitialized) {
 			QueryPerformanceFrequency(&s_frequency);
@@ -295,10 +295,11 @@ namespace F4R_AA
 		dispatch.cameraFar = cameraFar;
 		dispatch.cameraFovAngleVertical = cameraFovAngleVertical;
 		dispatch.viewSpaceToMetersFactor = 1.828125f / 128.0f;
+		auto& fsrState = RE::BSGraphics::State::GetSingleton();
 		dispatch.renderSize.width = renderWidth;
 		dispatch.renderSize.height = renderHeight;
-		dispatch.upscaleSize.width = renderWidth;
-		dispatch.upscaleSize.height = renderHeight;
+		dispatch.upscaleSize.width = fsrState.screenWidth;
+		dispatch.upscaleSize.height = fsrState.screenHeight;
 		dispatch.flags = 0;
 		dispatch.frameID = static_cast<uint64_t>(RE::BSGraphics::State::GetSingleton().frameCount);
 
@@ -317,6 +318,15 @@ namespace F4R_AA
 			REX::LogError("ffxFsr3ContextDispatchUpscale failed error={} (0x{:x})",
 				static_cast<int>(err), static_cast<int>(err));
 		}
+
+		ID3D11Buffer* nullCB = nullptr;
+		ID3D11UnorderedAccessView* nullUAVs[8] = {};
+		ID3D11ShaderResourceView* nullSRVs[16] = {};
+		ctx->CSSetConstantBuffers(0, 1, &nullCB);
+		ctx->CSSetUnorderedAccessViews(0, 8, nullUAVs, nullptr);
+		ctx->CSSetShaderResources(0, 16, nullSRVs);
+		ctx->CSSetShader(nullptr, nullptr, 0);
+
 		aa.resetHistory = false;
 	}
 
@@ -366,6 +376,14 @@ namespace F4R_AA
 		if (err != FFX_OK) {
 			REX::LogError("GenerateReactiveMask failed error={}", static_cast<int>(err));
 		}
+
+		ID3D11Buffer* nullCB = nullptr;
+		ID3D11UnorderedAccessView* nullUAVs[8] = {};
+		ID3D11ShaderResourceView* nullSRVs[16] = {};
+		ctx->CSSetConstantBuffers(0, 1, &nullCB);
+		ctx->CSSetUnorderedAccessViews(0, 8, nullUAVs, nullptr);
+		ctx->CSSetShaderResources(0, 16, nullSRVs);
+		ctx->CSSetShader(nullptr, nullptr, 0);
 	}
 }
 #endif

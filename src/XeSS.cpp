@@ -5,7 +5,7 @@
 
 #if F4R_HAS_XESS
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	namespace
 	{
@@ -109,7 +109,7 @@ namespace F4R_AA
 	bool XeSS::CreateD3D12(ID3D11Device* a_device, ID3D11DeviceContext* a_context)
 	{
 		if (!a_device || !a_context) {
-			REX::LogWarning("CreateD3D12 - null device/context");
+			REX::LogWarning("CreateD3D12: null device/context");
 			return false;
 		}
 
@@ -197,7 +197,7 @@ namespace F4R_AA
 		return true;
 	}
 
-	bool XeSS::CreateContext(uint32_t a_width, uint32_t a_height)
+	bool XeSS::CreateContext(uint32_t a_width, uint32_t a_height, int a_qualityMode)
 	{
 		if (!device) return false;
 
@@ -209,12 +209,17 @@ namespace F4R_AA
 		}
 
 		if (xessIsOptimalDriver && xessIsOptimalDriver(context) == XESS_RESULT_WARNING_OLD_DRIVER) {
-			REX::LogWarning("Old driver detected - XeSS quality may degrade");
+			REX::LogWarning("Old driver detected: XeSS quality may degrade");
 		}
+
+		xess_quality_settings_t quality = XESS_QUALITY_SETTING_AA;
+		if (a_qualityMode == 1) quality = XESS_QUALITY_SETTING_ULTRA_QUALITY;
+		else if (a_qualityMode == 2) quality = XESS_QUALITY_SETTING_BALANCED;
+		else if (a_qualityMode == 3) quality = XESS_QUALITY_SETTING_PERFORMANCE;
 
 		xess_d3d12_init_params_t params{};
 		params.outputResolution = { a_width, a_height };
-		params.qualitySetting = XESS_QUALITY_SETTING_AA;
+		params.qualitySetting = quality;
 		params.initFlags = XESS_INIT_FLAG_LDR_INPUT_COLOR;
 		params.creationNodeMask = 0;
 		params.visibleNodeMask = 0;
@@ -233,9 +238,16 @@ namespace F4R_AA
 		if (xessSetVelocityScale) {
 			xessSetVelocityScale(context, static_cast<float>(a_width), static_cast<float>(a_height));
 		}
+		if (xessSetJitterScale) {
+			xessSetJitterScale(context, 1.0f, 1.0f);
+		}
 
+		const char* qname = "Native";
+		if (quality == XESS_QUALITY_SETTING_QUALITY) qname = "Quality";
+		else if (quality == XESS_QUALITY_SETTING_BALANCED) qname = "Balanced";
+		else if (quality == XESS_QUALITY_SETTING_PERFORMANCE) qname = "Performance";
 		initialized = true;
-		REX::LogInformation("context created ({}x{})", a_width, a_height);
+		REX::LogInformation("XeSS context created ({}x{} {})", a_width, a_height, qname);
 		return true;
 	}
 

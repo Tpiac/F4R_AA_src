@@ -4,7 +4,7 @@
 
 #if F4R_HAS_FSR3
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	struct FidelityFX
 	{

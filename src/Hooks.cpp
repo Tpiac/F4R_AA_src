@@ -1,5 +1,5 @@
 #include "PCH.hpp"
-#include "AntiAliasing.hpp"
+#include "Upscaling.hpp"
 #include <Detours.h>
 #include <unordered_map>
 
@@ -7,7 +7,7 @@ namespace
 {
 	using namespace RE;
 	using namespace RE::BSGraphics;
-	using namespace F4R_AA;
+	using namespace F4R_Upscaling;
 
 	inline std::uintptr_t GetAEAddr(std::uintptr_t a_aeID, std::ptrdiff_t a_subOffset)
 	{
@@ -27,9 +27,9 @@ namespace
 	}
 
 #if F4R_HAS_FSR3
-	inline bool IsFSR3Mode()
+	inline bool IsFSR3Method()
 	{
-		return AntiAliasing::GetSingleton().settings.iAAMode == static_cast<int32_t>(AAMode::FSR3);
+		return Upscaling::GetSingleton().settings.iMethod == static_cast<int32_t>(Method::FSR3);
 	}
 #endif
 
@@ -46,80 +46,84 @@ namespace
 
 	bool Hook_TemporalAA_IsActive(ImageSpaceEffectTemporalAA* a_this)
 	{
-		auto& aa = AntiAliasing::GetSingleton();
-		if (aa.aaEnabled) {
+		auto& up = Upscaling::GetSingleton();
+		if (up.upsclEnabled) {
 			return false;
 		}
 		return g_originalTemporalAA_IsActive(a_this);
 	}
 
-	using PreRender_UpdateFunc = void(RenderTargetManager*, void*, void*, void*, void*);
-	PreRender_UpdateFunc* g_originalPreRender_Update = nullptr;
+	using PreRender_UpdateUpscStateFunc = void(RenderTargetManager*, void*, void*, void*, void*);
+	PreRender_UpdateUpscStateFunc* g_originalPreRender_UpdateUpscState = nullptr;
 
-	void Hook_PreRender_Update(RenderTargetManager* a_this, void* a_p2, void* a_p3, void* a_p4, void* a_p5)
+	void Hook_PreRender_UpdateUpscState(RenderTargetManager* a_this, void* a_p2, void* a_p3, void* a_p4, void* a_p5)
 	{
-		g_originalPreRender_Update(a_this, a_p2, a_p3, a_p4, a_p5);
-		AntiAliasing::GetSingleton().Update();
+		g_originalPreRender_UpdateUpscState(a_this, a_p2, a_p3, a_p4, a_p5);
+		Upscaling::GetSingleton().Update();
 	}
 
-	using PostRender_ApplyAAFunc = void(RenderTargetManager*, bool);
-	PostRender_ApplyAAFunc* g_originalPostRender_ApplyAA = nullptr;
+	using PostRender_UpscAndPreparePostFXFunc = void(RenderTargetManager*, bool);
+	PostRender_UpscAndPreparePostFXFunc* g_originalPostRender_UpscAndPreparePostFX = nullptr;
 
-	void Hook_PostRender_ApplyAA(RenderTargetManager* a_this, bool a_p2)
+	void Hook_PostRender_UpscAndPreparePostFX(RenderTargetManager* a_this, bool a_p2)
 	{
-		g_originalPostRender_ApplyAA(a_this, a_p2);
+		g_originalPostRender_UpscAndPreparePostFX(a_this, a_p2);
 
-		auto& aa = AntiAliasing::GetSingleton();
-		aa.Apply();
+		auto& up = Upscaling::GetSingleton();
+		up.Apply();
 
-		aa.savedWidthRatio = GetDynWidthRatio(*a_this);
-		aa.savedHeightRatio = GetDynHeightRatio(*a_this);
+		if (up.upsclEnabled && up.currentScale < 0.999f) {
+			up.BuildFlareDepth(*a_this);
+		}
+
+		up.savedWidthRatio = GetDynWidthRatio(*a_this);
+		up.savedHeightRatio = GetDynHeightRatio(*a_this);
 		GetDynWidthRatio(*a_this) = 1.0f;
 		GetDynHeightRatio(*a_this) = 1.0f;
 		GetDynResActivated(*a_this) = false;
 	}
 
-	using SamplerOverride_BeginFunc = void(void*);
-	SamplerOverride_BeginFunc* g_originalSamplerOverride_Begin = nullptr;
+	using SamplerState_OverrideMipBiasFunc = void(void*);
+	SamplerState_OverrideMipBiasFunc* g_originalSamplerState_OverrideMipBias = nullptr;
 
-	void Hook_SamplerOverride_Begin(void* a_this)
+	void Hook_SamplerState_OverrideMipBias(void* a_this)
 	{
-		AntiAliasing::GetSingleton().OverrideSamplerStates();
-		g_originalSamplerOverride_Begin(a_this);
-		AntiAliasing::GetSingleton().ResetSamplerStates();
+		Upscaling::GetSingleton().OverrideSamplerStates();
+		g_originalSamplerState_OverrideMipBias(a_this);
+		Upscaling::GetSingleton().ResetSamplerStates();
 	}
 
-	using SamplerOverride_EndFunc = void(void*);
-	SamplerOverride_EndFunc* g_originalSamplerOverride_End = nullptr;
+	using SamplerState_RestoreMipBiasFunc = void(void*);
+	SamplerState_RestoreMipBiasFunc* g_originalSamplerState_RestoreMipBias = nullptr;
 
-	void Hook_SamplerOverride_End(void* a_this)
+	void Hook_SamplerState_RestoreMipBias(void* a_this)
 	{
-		AntiAliasing::GetSingleton().OverrideSamplerStates();
-		g_originalSamplerOverride_End(a_this);
-		AntiAliasing::GetSingleton().ResetSamplerStates();
+		Upscaling::GetSingleton().OverrideSamplerStates();
+		g_originalSamplerState_RestoreMipBias(a_this);
+		Upscaling::GetSingleton().ResetSamplerStates();
 
 #if F4R_HAS_FSR3
-		auto& aa = AntiAliasing::GetSingleton();
-		if (IsFSR3Mode() && aa.aaEnabled && aa.fidelityFX) {
-			aa.fidelityFX->GenerateReactiveMask();
+		auto& up = Upscaling::GetSingleton();
+		if (IsFSR3Method() && up.upsclEnabled && up.fidelityFX) {
+			up.fidelityFX->GenerateReactiveMask();
 		}
 #endif
 	}
 
 #if F4R_HAS_FSR3
-	using Capture_OpaqueFunc = void(BSShaderAccumulator*);
-	Capture_OpaqueFunc* g_originalCapture_Opaque = nullptr;
+	using CaptureOpaque_ForReactiveMaskFunc = void(BSShaderAccumulator*);
+	CaptureOpaque_ForReactiveMaskFunc* g_originalCaptureOpaque_ForReactiveMask = nullptr;
 
-	void Hook_Capture_Opaque(BSShaderAccumulator* a_this)
+	void Hook_CaptureOpaque_ForReactiveMask(BSShaderAccumulator* a_this)
 	{
-		g_originalCapture_Opaque(a_this);
+		g_originalCaptureOpaque_ForReactiveMask(a_this);
 
-		if (!IsFSR3Mode()) return;
+		if (!IsFSR3Method()) return;
 
-		auto& aa = AntiAliasing::GetSingleton();
-		if (!aa.aaEnabled || !aa.fidelityFX ||
-			!aa.fidelityFX->colorOpaqueOnlyTexture ||
-			!aa.fidelityFX->colorOpaqueOnlyTexture->resource)
+		auto& up = Upscaling::GetSingleton();
+		if (!up.upsclEnabled || !up.fidelityFX ||
+			!up.fidelityFX->colorOpaqueOnlyTexture ||
+			!up.fidelityFX->colorOpaqueOnlyTexture->resource)
 			return;
 
 		auto* rendererData = BSGraphics::RendererData::GetSingleton();
@@ -128,55 +132,105 @@ namespace
 		auto* ctx = GetImmediateContext();
 		if (!ctx) return;
 
-		auto* rt4 = reinterpret_cast<ID3D11Texture2D*>(rendererData->renderTargets[F4R_AA::RenderTarget::kMainTemp].texture);
+		auto* rt4 = reinterpret_cast<ID3D11Texture2D*>(rendererData->renderTargets[F4R_Upscaling::RenderTarget::kMainTemp].texture);
 		if (!rt4) return;
 
-		ctx->CopyResource(aa.fidelityFX->colorOpaqueOnlyTexture->resource, rt4);
+		ctx->CopyResource(up.fidelityFX->colorOpaqueOnlyTexture->resource, rt4);
 	}
 #endif
 
-	using PreserveJitter_EffectsFunc = void(RenderTargetManager*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
-	PreserveJitter_EffectsFunc* g_originalPreserveJitter_Effects = nullptr;
+	using Effects_PreserveJitterFunc = void(RenderTargetManager*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+	Effects_PreserveJitterFunc* g_originalEffects_PreserveJitter = nullptr;
 
-	void Hook_PreserveJitter_Effects(RenderTargetManager* a_this, std::uint32_t a_p2, std::uint32_t a_p3, std::uint32_t a_p4, std::uint32_t a_p5)
+	void Hook_Effects_PreserveJitter(RenderTargetManager* a_this, std::uint32_t a_p2, std::uint32_t a_p3, std::uint32_t a_p4, std::uint32_t a_p5)
 	{
 		auto& state = State::GetSingleton();
 		float savedX = state.offsetX;
 		float savedY = state.offsetY;
 
-		g_originalPreserveJitter_Effects(a_this, a_p2, a_p3, a_p4, a_p5);
+		g_originalEffects_PreserveJitter(a_this, a_p2, a_p3, a_p4, a_p5);
 
 		state.offsetX = savedX;
 		state.offsetY = savedY;
 	}
 
-	using Loading_ClearHistoryFunc = void();
-	Loading_ClearHistoryFunc* g_originalLoading_ClearHistory = nullptr;
+	using Loading_ResetDynamicResolutionFunc = void();
+	Loading_ResetDynamicResolutionFunc* g_originalLoading_ResetDynamicResolution = nullptr;
 
-	void Hook_Loading_ClearHistory()
+	void Hook_Loading_ResetDynamicResolution()
 	{
-		g_originalLoading_ClearHistory();
+		g_originalLoading_ResetDynamicResolution();
 
 		auto& rtMgr = RenderTargetManager::GetSingleton();
 		GetDynWidthRatio(rtMgr) = 1.0f;
 		GetDynHeightRatio(rtMgr) = 1.0f;
 		GetDynResActivated(rtMgr) = false;
-		AntiAliasing::GetSingleton().RequestReset();
+		Upscaling::GetSingleton().RequestReset();
 	}
 
-	using Frame_ImagespaceEntryFunc = void(void*);
-	Frame_ImagespaceEntryFunc* g_originalFrame_ImagespaceEntry = nullptr;
+	using ImageSpace_RestoreDynamicResolutionFunc = void(void*);
+	ImageSpace_RestoreDynamicResolutionFunc* g_originalImageSpace_RestoreDynamicResolution = nullptr;
 
-	void Hook_Frame_ImagespaceEntry(void* a_this)
+	void Hook_ImageSpace_RestoreDynamicResolution(void* a_this)
 	{
-		g_originalFrame_ImagespaceEntry(a_this);
+		g_originalImageSpace_RestoreDynamicResolution(a_this);
 
 		auto& rtMgr = RenderTargetManager::GetSingleton();
-		auto& aa = AntiAliasing::GetSingleton();
-		GetDynWidthRatio(rtMgr) = aa.savedWidthRatio;
-		GetDynHeightRatio(rtMgr) = aa.savedHeightRatio;
+		auto& up = Upscaling::GetSingleton();
+		GetDynWidthRatio(rtMgr) = up.savedWidthRatio;
+		GetDynHeightRatio(rtMgr) = up.savedHeightRatio;
 		GetDynResActivated(rtMgr) =
-			(aa.savedWidthRatio != 1.0f || aa.savedHeightRatio != 1.0f);
+			(up.savedWidthRatio != 1.0f || up.savedHeightRatio != 1.0f);
+	}
+
+	
+
+	using LensFlare_ForceFullResDepthFunc = void(RE::NiCamera*);
+	LensFlare_ForceFullResDepthFunc* g_originalLensFlare_ForceFullResDepth = nullptr;
+
+void Hook_LensFlare_ForceFullResDepth(RE::NiCamera* a_camera)
+{
+		auto& rtMgr = RE::BSGraphics::RenderTargetManager::GetSingleton();
+		auto& up = Upscaling::GetSingleton();
+		up.PopFlareDepth();
+		bool need = (GetDynWidthRatio(rtMgr) != 1.0f || GetDynHeightRatio(rtMgr) != 1.0f);
+		if (need) up.PushFlareDepth();
+		g_originalLensFlare_ForceFullResDepth(a_camera);
+		up.PopFlareDepth();
+	}
+
+	using SSLRRaytracing_SkipInQualityModesFunc = void(RE::BSShader*, std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t);
+	SSLRRaytracing_SkipInQualityModesFunc* g_originalSSLRRaytracing_SkipInQualityModes = nullptr;
+
+	void Hook_SSLRRaytracing_SkipInQualityModes(RE::BSShader* a_this, std::uint32_t a_p2, std::uint32_t a_p3, std::uint32_t a_p4, std::uint32_t a_p5)
+	{
+		if (g_originalSSLRRaytracing_SkipInQualityModes) {
+			g_originalSSLRRaytracing_SkipInQualityModes(a_this, a_p2, a_p3, a_p4, a_p5);
+		}
+		auto& up = Upscaling::GetSingleton();
+		if (up.upsclEnabled && up.currentScale < 0.999f && up.settings.iQualityMode >= 1 && !g_enbLoaded) {
+			auto* rendererData = BSGraphics::RendererData::GetSingleton();
+			auto* ctx = GetImmediateContext();
+			if (rendererData && ctx) {
+				static const float kClear[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+				static const std::uint32_t kSSRTargets[] = {
+					F4R_Upscaling::RenderTarget::kSSRRaw,
+					F4R_Upscaling::RenderTarget::kSSRBlurred,
+					F4R_Upscaling::RenderTarget::kSSRBlurredExtra,
+					F4R_Upscaling::RenderTarget::kSSRDirection,
+					F4R_Upscaling::RenderTarget::kSSRMask,
+				};
+				for (auto idx : kSSRTargets) {
+					if (idx >= rendererData->renderTargets.size()) {
+						continue;
+					}
+					auto* rtv = reinterpret_cast<ID3D11RenderTargetView*>(rendererData->renderTargets[idx].rtView);
+					if (rtv) {
+						ctx->ClearRenderTargetView(rtv, kClear);
+					}
+				}
+			}
+		}
 	}
 
 	std::unordered_map<ID3D11SamplerState*, ID3D11SamplerState*> g_samplerCache;
@@ -218,7 +272,7 @@ namespace
 	}
 }
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	void InstallContextHooks()
 	{
@@ -234,7 +288,7 @@ namespace F4R_AA
 		REX::LogDebug("PSSetSamplers hook installed");
 	}
 
-	void AntiAliasing::InstallHooks()
+	void Upscaling::InstallHooks()
 	{
 		REX::LogDebug("Installing hooks...");
 
@@ -252,60 +306,86 @@ namespace F4R_AA
 
 		{
 			auto addr = ResolveAddr(0x2857480 + 0x14b, 0x235FF1, 0x29F);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_PreRender_Update));
-			g_originalPreRender_Update = reinterpret_cast<PreRender_UpdateFunc*>(result);
-			LogHookResult("PreRender_Update", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_PreRender_UpdateUpscState));
+			g_originalPreRender_UpdateUpscState = reinterpret_cast<PreRender_UpdateUpscStateFunc*>(result);
+			LogHookResult("PreRender_UpdateUpscState", result);
 		}
 
 		{
 			auto addr = ResolveAddr(0x2857110 + 0xe1, 0x235FF2, 0xC5);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_PostRender_ApplyAA));
-			g_originalPostRender_ApplyAA = reinterpret_cast<PostRender_ApplyAAFunc*>(result);
-			LogHookResult("PostRender_ApplyAA", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_PostRender_UpscAndPreparePostFX));
+			g_originalPostRender_UpscAndPreparePostFX = reinterpret_cast<PostRender_UpscAndPreparePostFXFunc*>(result);
+			LogHookResult("PostRender_UpscAndPreparePostFX", result);
 		}
 
 		{
 			auto addr = ResolveAddr(0x2857480 + 0x17f, 0x235FF1, 0x2E3);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_SamplerOverride_Begin));
-			g_originalSamplerOverride_Begin = reinterpret_cast<SamplerOverride_BeginFunc*>(result);
-			LogHookResult("SamplerOverride_Begin", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_SamplerState_OverrideMipBias));
+			g_originalSamplerState_OverrideMipBias = reinterpret_cast<SamplerState_OverrideMipBiasFunc*>(result);
+			LogHookResult("SamplerState_OverrideMipBias", result);
 		}
 
 		{
 			auto addr = ResolveAddr(0x2857480 + 0x1c9, 0x235FF1, 0x3A6);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_SamplerOverride_End));
-			g_originalSamplerOverride_End = reinterpret_cast<SamplerOverride_EndFunc*>(result);
-			LogHookResult("SamplerOverride_End", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_SamplerState_RestoreMipBias));
+			g_originalSamplerState_RestoreMipBias = reinterpret_cast<SamplerState_RestoreMipBiasFunc*>(result);
+			LogHookResult("SamplerState_RestoreMipBias", result);
 		}
 
 #if F4R_HAS_FSR3
 		{
 			auto addr = ResolveAddr(0x28568B0 + 0x1dc, 0x235FEB, 0x4C6);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_Capture_Opaque));
-			g_originalCapture_Opaque = reinterpret_cast<Capture_OpaqueFunc*>(result);
-			LogHookResult("Capture_Opaque", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_CaptureOpaque_ForReactiveMask));
+			g_originalCaptureOpaque_ForReactiveMask = reinterpret_cast<CaptureOpaque_ForReactiveMaskFunc*>(result);
+			LogHookResult("CaptureOpaque_ForReactiveMask", result);
 		}
 #endif
 
 		{
 			auto addr = ResolveAddr(0x2857110 + 0x9f, 0x235FF2, 0x83);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_PreserveJitter_Effects));
-			g_originalPreserveJitter_Effects = reinterpret_cast<PreserveJitter_EffectsFunc*>(result);
-			LogHookResult("PreserveJitter_Effects", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_Effects_PreserveJitter));
+			g_originalEffects_PreserveJitter = reinterpret_cast<Effects_PreserveJitterFunc*>(result);
+			LogHookResult("Effects_PreserveJitter", result);
 		}
+
+		
 
 		{
 			auto addr = ResolveAddr(0x1297BE0 + 0x2bd, 0x225209, 0x275);
-			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_Loading_ClearHistory));
-			g_originalLoading_ClearHistory = reinterpret_cast<Loading_ClearHistoryFunc*>(result);
-			LogHookResult("Loading_ClearHistory", result);
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_Loading_ResetDynamicResolution));
+			g_originalLoading_ResetDynamicResolution = reinterpret_cast<Loading_ResetDynamicResolutionFunc*>(result);
+			LogHookResult("Loading_ResetDynamicResolution", result);
 		}
 
 		{
 			auto addr = ResolveAddr(0x2857110, 0x235FF2, 0);
-			auto result = Detours::X64::DetourFunction(addr, reinterpret_cast<std::uintptr_t>(&Hook_Frame_ImagespaceEntry));
-			g_originalFrame_ImagespaceEntry = reinterpret_cast<Frame_ImagespaceEntryFunc*>(result);
-			LogHookResult("Frame_ImagespaceEntry", result);
+			auto result = Detours::X64::DetourFunction(addr, reinterpret_cast<std::uintptr_t>(&Hook_ImageSpace_RestoreDynamicResolution));
+			g_originalImageSpace_RestoreDynamicResolution = reinterpret_cast<ImageSpace_RestoreDynamicResolutionFunc*>(result);
+			LogHookResult("ImageSpace_RestoreDynamicResolution", result);
+		}
+
+		{
+			std::uintptr_t addr;
+			if (IsAE() || IsNG()) {
+				addr = REL::Relocation{ REL::Id<>{ 2317547 } }.GetAddress();
+			} else {
+				addr = REL::Relocation{ REL::Id<>{ 676108 } }.GetAddress();
+			}
+			auto result = Detours::X64::DetourFunction(addr, reinterpret_cast<std::uintptr_t>(&Hook_LensFlare_ForceFullResDepth));
+			g_originalLensFlare_ForceFullResDepth = reinterpret_cast<LensFlare_ForceFullResDepthFunc*>(result);
+			LogHookResult("LensFlare_ForceFullResDepth", result);
+		}
+
+		if (!g_enbLoaded) {
+			std::uintptr_t addr;
+			if (IsAE() || IsNG()) {
+				addr = REL::Relocation{ REL::Id<>{ 2317302 } }.GetAddress() + 0x1C;
+			} else {
+				addr = REL::Relocation{ REL::Id<>{ 779077 } }.GetAddress() + 0x1C;
+			}
+			auto result = REL::GetTrampoline()->WriteCall5(addr, reinterpret_cast<std::uintptr_t>(&Hook_SSLRRaytracing_SkipInQualityModes));
+			g_originalSSLRRaytracing_SkipInQualityModes = reinterpret_cast<SSLRRaytracing_SkipInQualityModesFunc*>(result);
+			LogHookResult("SSLRRaytracing_SkipInQualityModes", result);
 		}
 
 		REX::LogDebug("All hooks installed");

@@ -1,17 +1,18 @@
 #include "PCH.hpp"
-#include "AntiAliasing.hpp"
+#include "Upscaling.hpp"
 #include "Streamline.hpp"
 #include "XeSS.hpp"
 
 #include "Shaders/MVFix.hpp"
 #include "Shaders/RCAS.hpp"
 #include "Shaders/DepthCopy.hpp"
+#include "Shaders/DepthUpscale.hpp"
 
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	namespace
 	{
@@ -122,6 +123,8 @@ namespace F4R_AA
 			a_ctx->CSSetUnorderedAccessViews(0, 1, nullUav, nullptr);
 			ID3D11ShaderResourceView* nullSrvs[2] = { nullptr, nullptr };
 			a_ctx->CSSetShaderResources(0, a_numSRVs, nullSrvs);
+			ID3D11Buffer* nullBuf = nullptr;
+			a_ctx->CSSetConstantBuffers(0, 1, &nullBuf);
 			a_ctx->CSSetShader(nullptr, nullptr, 0);
 		}
 
@@ -175,20 +178,39 @@ namespace F4R_AA
 		float pad2;
 	};
 
-	AntiAliasing& AntiAliasing::GetSingleton()
+	struct FlareDepthConstants
 	{
-		static AntiAliasing instance;
+		uint32_t targetWidth;
+		uint32_t targetHeight;
+		uint32_t sourceWidth;
+		uint32_t sourceHeight;
+		float camFar;
+		float camNear;
+		float camFarMinusNear;
+		float camFarTimesNear;
+	};
+
+	Upscaling& Upscaling::GetSingleton()
+	{
+		static Upscaling instance;
 		return instance;
 	}
 
-	AntiAliasing::~AntiAliasing() = default;
+	Upscaling::~Upscaling() = default;
 
-	void AntiAliasing::LoadSettings(const std::string& a_iniPath)
+	void Upscaling::LoadSettings(const std::string& a_iniPath)
 	{
 		char buf[64];
 
-		GetPrivateProfileStringA("Settings", "iAAMode", F4R_STRINGIFY(F4R_DEFAULT_AAMODE), buf, sizeof(buf), a_iniPath.c_str());
-		settings.iAAMode = ParseInt32(buf, F4R_DEFAULT_AAMODE);
+		GetPrivateProfileStringA("Settings", "iMethod", F4R_STRINGIFY(F4R_DEFAULT_Method), buf, sizeof(buf), a_iniPath.c_str());
+		settings.iMethod = ParseInt32(buf, F4R_DEFAULT_Method);
+#if F4R_HAS_DLSS && !F4R_HAS_FSR3 && !F4R_HAS_XESS
+		settings.iMethod = static_cast<int32_t>(Method::DLSS);
+#elif !F4R_HAS_DLSS && F4R_HAS_FSR3 && !F4R_HAS_XESS
+		settings.iMethod = static_cast<int32_t>(Method::FSR3);
+#elif !F4R_HAS_DLSS && !F4R_HAS_FSR3 && F4R_HAS_XESS
+		settings.iMethod = static_cast<int32_t>(Method::XeSS);
+#endif
 
 		GetPrivateProfileStringA("Settings", "fSharpness", "0.5", buf, sizeof(buf), a_iniPath.c_str());
 		settings.fSharpness = ParseFloat(buf, 0.5f);
@@ -196,11 +218,17 @@ namespace F4R_AA
 		GetPrivateProfileStringA("Settings", "iDLSSPreset", "11", buf, sizeof(buf), a_iniPath.c_str());
 		settings.iDLSSPreset = ParseInt32(buf, 11);
 
+		GetPrivateProfileStringA("Settings", "iQualityMode", "0", buf, sizeof(buf), a_iniPath.c_str());
+		settings.iQualityMode = ParseInt32(buf, 0);
+		if (settings.iQualityMode < 0) settings.iQualityMode = 0;
+		if (settings.iQualityMode > 3) settings.iQualityMode = 3;
+
 		GetPrivateProfileStringA("Advanced", "fAnisotropicMipBias", "-0.0001", buf, sizeof(buf), a_iniPath.c_str());
 		settings.fAnisotropicMipBias = ParseFloat(buf, -0.0001f);
 
 #if F4R_HAS_DLSS
-	Streamline::GetSingleton().preset = static_cast<sl::DLSSPreset>(settings.iDLSSPreset);
+		settings.iDLSSPreset = 11;
+		Streamline::GetSingleton().preset = static_cast<sl::DLSSPreset>(settings.iDLSSPreset);
 
 	GetPrivateProfileStringA("Settings", "bEnableReflex", "1", buf, sizeof(buf), a_iniPath.c_str());
 	settings.bEnableReflex = ParseInt32(buf, 1) != 0;
@@ -218,45 +246,49 @@ namespace F4R_AA
 	settings.fReflexFPSLimit = reflexFPSLimit;
 #endif
 
-	const auto mode = static_cast<AAMode>(settings.iAAMode);
-	if (mode == AAMode::DLAA) {
+	const auto mode = static_cast<Method>(settings.iMethod);
+	if (mode == Method::DLSS) {
+		const char* qname = "Native";
+		if (settings.iQualityMode == 1) qname = "Quality";
+		else if (settings.iQualityMode == 2) qname = "Balanced";
+		else if (settings.iQualityMode == 3) qname = "Performance";
 #if F4R_HAS_DLSS
-		REX::LogInformation("Settings loaded - mode=DLAA sharpness={} mipBias={} reflex={} dlssPreset={}",
-			settings.fSharpness, settings.fAnisotropicMipBias,
-			settings.bEnableReflex ? "enabled" : "disabled", settings.iDLSSPreset);
+		REX::LogInformation("Settings loaded: method=DLSS quality={} sharpness={} mipBias={} reflex={}",
+			qname, settings.fSharpness, settings.fAnisotropicMipBias,
+			settings.bEnableReflex ? "enabled" : "disabled");
 #else
-		REX::LogInformation("Settings loaded - mode=DLAA sharpness={} mipBias={} dlssPreset={}",
-			settings.fSharpness, settings.fAnisotropicMipBias, settings.iDLSSPreset);
+		REX::LogInformation("Settings loaded: method=DLSS quality={} sharpness={} mipBias={}",
+			qname, settings.fSharpness, settings.fAnisotropicMipBias);
 #endif
-	} else if (mode == AAMode::FSR3) {
-			REX::LogInformation("Settings loaded - mode=FSR3 sharpness={} mipBias={}",
+	} else if (mode == Method::FSR3) {
+			REX::LogInformation("Settings loaded: method=FSR3 sharpness={} mipBias={}",
 				settings.fSharpness, settings.fAnisotropicMipBias);
-		} else if (mode == AAMode::XeSS) {
-			REX::LogInformation("Settings loaded - mode=XeSS sharpness={} mipBias={}",
+		} else if (mode == Method::XeSS) {
+			REX::LogInformation("Settings loaded: method=XeSS sharpness={} mipBias={}",
 				settings.fSharpness, settings.fAnisotropicMipBias);
 		} else {
-			REX::LogInformation("Settings loaded - mode=Off");
+			REX::LogInformation("Settings loaded: method=Off");
 		}
 	}
 
-	void AntiAliasing::RequestReset()
+	void Upscaling::RequestReset()
 	{
 		resetHistory = true;
 	}
 
-	void AntiAliasing::Init()
+	void Upscaling::Init()
 {
 		static bool s_initialized = false;
 		if (s_initialized) {
-			REX::LogWarning("Init called twice - ignoring (hooks already installed)");
+			REX::LogWarning("Init called twice: ignoring (hooks already installed)");
 			return;
 		}
 		s_initialized = true;
 
 		REX::LogDebug("Init called");
 
-		if (settings.iAAMode == static_cast<int32_t>(AAMode::Off)) {
-			REX::LogInformation("Off mode - no hooks installed");
+		if (settings.iMethod == static_cast<int32_t>(Method::Off)) {
+			REX::LogInformation("Off mode: no hooks installed");
 			return;
 		}
 
@@ -275,9 +307,8 @@ namespace F4R_AA
 		if (!ui) return false;
 
 		static const std::initializer_list<const char*> blockedMenus = {
-			"PipboyMenu", "BarterMenu", "InventoryMenu",
-			"CraftingMenu", "MainMenu", "MapMenu",
-			"PauseMenu", "LoadingMenu",
+			"PauseMenu", "PipboyMenu", "InventoryMenu",
+			"BarterMenu", "CraftingMenu", "MapMenu",
 			"ExamineMenu", "TerminalMenu"
 		};
 		for (auto name : blockedMenus) {
@@ -287,51 +318,54 @@ namespace F4R_AA
 		return false;
 	}
 
-	void AntiAliasing::Update()
+	void Upscaling::Update()
 	{
-		const auto mode = static_cast<AAMode>(settings.iAAMode);
-		aaEnabled = false;
-		if (mode == AAMode::Off) {
+		const auto mode = static_cast<Method>(settings.iMethod);
+		upsclEnabled = false;
+		if (mode == Method::Off) {
+			currentScale = 1.0f;
 			return;
 		}
 
 #if F4R_HAS_DLSS
-		if (mode == AAMode::DLAA) {
+		if (mode == Method::DLSS) {
 			auto& streamline = Streamline::GetSingleton();
-			aaEnabled = streamline.initialized && streamline.featureDLSS;
+			upsclEnabled = streamline.initialized && streamline.featureDLSS;
 		}
 #endif
 #if F4R_HAS_FSR3
-		if (mode == AAMode::FSR3) {
-			aaEnabled = true;
+		if (mode == Method::FSR3) {
+			upsclEnabled = true;
 		}
 #endif
 #if F4R_HAS_XESS
-		if (mode == AAMode::XeSS) {
-			aaEnabled = XeSS::GetSingleton().initialized;
+		if (mode == Method::XeSS) {
+			upsclEnabled = true;
 		}
 #endif
 
 		auto* main = RE::Main::GetSingleton();
-		bool prevEnabled = aaEnabled;
-		if (main && (!main->gameActive || IsMenuBlocked())) {
-			aaEnabled = false;
+		bool prevEnabled = upsclEnabled;
+		bool shouldBlock = IsMenuBlocked();
+		if (main && (!main->gameActive || shouldBlock)) {
+			upsclEnabled = false;
 		}
 
-		if (!prevEnabled && aaEnabled) {
+		if (!prevEnabled && upsclEnabled) {
 			resetHistory = true;
 		}
-		if ((mode == AAMode::XeSS || mode == AAMode::FSR3 || mode == AAMode::DLAA) && !aaEnabled) {
+		if ((mode == Method::XeSS || mode == Method::FSR3 || mode == Method::DLSS) && !upsclEnabled) {
 			resetHistory = true;
 		}
+		static float s_prevScale = 1.0f;
 
 #if F4R_HAS_DLSS
-		if (mode == AAMode::DLAA) {
+		if (mode == Method::DLSS) {
 			Streamline::GetSingleton().UpdateLatency();
 		}
 #endif
 
-		if (mode == AAMode::FSR3 && g_enbLoaded && !g_realDevice && !g_enbExtractionFailed) {
+		if ((mode == Method::FSR3 || mode == Method::XeSS) && g_enbLoaded && !g_realDevice && !g_enbExtractionFailed) {
 			ExtractRealD3D11();
 		}
 
@@ -340,37 +374,74 @@ namespace F4R_AA
 		auto& state = RE::BSGraphics::State::GetSingleton();
 		auto& rtMgr = RE::BSGraphics::RenderTargetManager::GetSingleton();
 
-		if (aaEnabled) {
-			int32_t renderWidth = static_cast<int32_t>(state.screenWidth);
-			int32_t displayWidth = static_cast<int32_t>(state.screenWidth);
+		float desiredScale = 1.0f;
+#if F4R_HAS_DLSS
+		if (mode == Method::DLSS && upsclEnabled && !g_enbLoaded) {
+			if (settings.iQualityMode == 1) desiredScale = 0.6666667f;
+			else if (settings.iQualityMode == 2) desiredScale = 0.5882353f;
+			else if (settings.iQualityMode == 3) desiredScale = 0.5f;
+		}
+#endif
 #if F4R_HAS_FSR3
-			if (mode == AAMode::FSR3) {
-				int32_t phaseCount = ffxFsr3GetJitterPhaseCount(renderWidth, displayWidth);
-				ffxFsr3GetJitterOffset(&jitterX, &jitterY, state.frameCount, phaseCount);
-			} else
+		if (mode == Method::FSR3 && upsclEnabled && !g_enbLoaded) {
+			if (settings.iQualityMode == 1) desiredScale = 0.6666667f;
+			else if (settings.iQualityMode == 2) desiredScale = 0.5882353f;
+			else if (settings.iQualityMode == 3) desiredScale = 0.5f;
+		}
 #endif
-			{
 #if F4R_HAS_XESS
-				float basePhaseCount = (mode == AAMode::XeSS) ? 16.0f : 8.0f;
-#else
-				float basePhaseCount = 8.0f;
+		if (mode == Method::XeSS && upsclEnabled && !g_enbLoaded) {
+			if (settings.iQualityMode == 1) desiredScale = 0.6666667f;
+			else if (settings.iQualityMode == 2) desiredScale = 0.5882353f;
+			else if (settings.iQualityMode == 3) desiredScale = 0.5f;
+		}
 #endif
-				int32_t phaseCount = GetJitterPhaseCount(renderWidth, displayWidth, basePhaseCount);
-				GetJitterOffset(&jitterX, &jitterY, state.frameCount, phaseCount);
-			}
+		if (!upsclEnabled) {
+			desiredScale = 1.0f;
+		}
+		currentScale = desiredScale;
 
-			state.offsetX = (jitterX * -2.0f) / static_cast<float>(state.screenWidth);
-			state.offsetY = (jitterY * 2.0f) / static_cast<float>(state.screenHeight);
+		{
+			int32_t displayWidth = static_cast<int32_t>(state.screenWidth);
+			int32_t renderWidth = static_cast<int32_t>(static_cast<float>(displayWidth) * desiredScale);
+			if (renderWidth < 1) renderWidth = 1;
+			if (upsclEnabled) {
+#if F4R_HAS_FSR3
+				if (mode == Method::FSR3) {
+					int32_t phaseCount = ffxFsr3GetJitterPhaseCount(renderWidth, displayWidth);
+					ffxFsr3GetJitterOffset(&jitterX, &jitterY, state.frameCount, phaseCount);
+				} else
+#endif
+				{
+#if F4R_HAS_XESS
+					float basePhaseCount = (mode == Method::XeSS) ? 16.0f : 8.0f;
+#else
+					float basePhaseCount = 8.0f;
+#endif
+					int32_t phaseCount = GetJitterPhaseCount(renderWidth, displayWidth, basePhaseCount);
+					GetJitterOffset(&jitterX, &jitterY, state.frameCount, phaseCount);
+				}
+
+				state.offsetX = (jitterX * -2.0f) / static_cast<float>(state.screenWidth);
+				state.offsetY = (jitterY * 2.0f) / static_cast<float>(state.screenHeight);
+			} else {
+				jitterX = 0.0f;
+				jitterY = 0.0f;
+				state.offsetX = 0.0f;
+				state.offsetY = 0.0f;
+			}
 		}
 
-		if (aaEnabled) {
+		{
 			auto* samplerStates = GetGlobalSamplers();
 
 			if (samplerStates) {
-				constexpr float mipBias = -1.0f;
+				float targetMipBias = (desiredScale < 0.999f) ? (std::log2(desiredScale) - 1.0f) : -1.0f;
+				float anisoBias = (desiredScale < 0.999f) ? std::log2(desiredScale) : settings.fAnisotropicMipBias;
 
 				static float s_previousMipBias = 0.0f;
-				bool needsRebuild = (s_previousMipBias != mipBias);
+				static float s_previousAnisoBias = 0.0f;
+				bool needsRebuild = (s_previousMipBias != targetMipBias) || (s_previousAnisoBias != anisoBias);
 
 				auto* device = GetRenderer();
 
@@ -396,10 +467,7 @@ namespace F4R_AA
 							bool shouldClone = false;
 							if (desc.Filter == D3D11_FILTER_ANISOTROPIC) {
 								desc.MaxAnisotropy = 8;
-								desc.MipLODBias = settings.fAnisotropicMipBias;
-								shouldClone = true;
-							} else if (desc.Filter == D3D11_FILTER_MIN_MAG_MIP_LINEAR) {
-								desc.MipLODBias = mipBias;
+								desc.MipLODBias = anisoBias;
 								shouldClone = true;
 							}
 							if (shouldClone) {
@@ -413,23 +481,29 @@ namespace F4R_AA
 				}
 
 				if (needsRebuild) {
-					s_previousMipBias = mipBias;
+					s_previousMipBias = targetMipBias;
+					s_previousAnisoBias = anisoBias;
 				}
 			}
 		}
 
-		GetDynHeightRatio(rtMgr) = 1.0f;
-		GetDynWidthRatio(rtMgr) = 1.0f;
-		GetDynResActivated(rtMgr) = false;
+		GetDynHeightRatio(rtMgr) = desiredScale;
+		GetDynWidthRatio(rtMgr) = desiredScale;
+		GetDynResActivated(rtMgr) = (desiredScale < 0.999f);
+
+		if (s_prevScale != desiredScale) {
+			resetHistory = true;
+			s_prevScale = desiredScale;
+		}
 
 		UpdateGameSettings();
 		CheckResources();
 	}
 
-	void AntiAliasing::Apply()
+	void Upscaling::Apply()
 	{
-		const auto mode = static_cast<AAMode>(settings.iAAMode);
-		if (mode == AAMode::Off) return;
+		const auto mode = static_cast<Method>(settings.iMethod);
+		if (mode == Method::Off) return;
 
 		auto* main = RE::Main::GetSingleton();
 
@@ -440,7 +514,7 @@ namespace F4R_AA
 			}
 		}
 
-		if (!aaEnabled) return;
+		if (!upsclEnabled) return;
 
 		auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
 		if (!rendererData) return;
@@ -461,7 +535,7 @@ namespace F4R_AA
 		if (!backBufferResource) return;
 
 #if F4R_HAS_XESS
-		if (mode == AAMode::XeSS) {
+		if (mode == Method::XeSS) {
 			if (!xessColorTexture || !xessColorTexture->resource) {
 				backBufferResource->Release();
 				return;
@@ -481,7 +555,7 @@ namespace F4R_AA
 		uint32_t renderH = static_cast<uint32_t>(static_cast<float>(state.screenHeight) * GetDynHeightRatio(rtMgr));
 
 #if F4R_HAS_DLSS
-		if (mode == AAMode::DLAA) {
+		if (mode == Method::DLSS) {
 			auto& streamline = Streamline::GetSingleton();
 
 			if (!workingTexture || !workingTexture->resource || !workingTexture->srv) {
@@ -520,11 +594,15 @@ namespace F4R_AA
 				}
 			}
 
+			uint32_t dlssQuality = 0u;
+			if (currentScale < 0.999f) {
+				if (settings.iQualityMode >= 1 && settings.iQualityMode <= 3) dlssQuality = static_cast<uint32_t>(settings.iQualityMode);
+			}
 			streamline.Evaluate(
 				workingTexture->resource,
 				workingTexture->srv,
 				motionVectorTexture ? motionVectorTexture->resource : nullptr,
-				jitterX, jitterY, renderW, renderH, 0);
+				jitterX, jitterY, renderW, renderH, dlssQuality);
 			resetHistory = false;
 
 			if (settings.fSharpness > 0.0f && tempTexture && tempTexture->resource &&
@@ -549,7 +627,7 @@ namespace F4R_AA
 		}
 #endif
 #if F4R_HAS_FSR3
-		if (mode == AAMode::FSR3) {
+		if (mode == Method::FSR3) {
 			if (fidelityFX) {
 				fidelityFX->Apply(workingTexture->resource, jitterX, jitterY, renderW, renderH);
 			}
@@ -558,7 +636,7 @@ namespace F4R_AA
 		}
 #endif
 #if F4R_HAS_XESS
-		if (mode == AAMode::XeSS) {
+		if (mode == Method::XeSS) {
 			if (xessMotionVectorTexture && xessMotionVectorTexture->resource) {
 				ID3D11Resource* rawMV = reinterpret_cast<ID3D11Resource*>(rendererData->renderTargets[RenderTarget::kMotionVectors].texture);
 				if (rawMV) {
@@ -566,13 +644,40 @@ namespace F4R_AA
 				}
 			}
 
-			if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
+if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 				ID3D11ShaderResourceView* depthSRV =
 					reinterpret_cast<ID3D11ShaderResourceView*>(rendererData->depthStencilTargets[DepthStencil::kMain].srViewDepth);
 
 				if (depthSRV) {
 					ID3D11ShaderResourceView* srvs[1] = { depthSRV };
 					RunComputePass(ctx, depthCopyShader, nullptr, srvs, 1, xessDepthTexture->uav,
+						(renderW + 7) / 8, (renderH + 7) / 8);
+				}
+			}
+
+			if (xessMotionVectorTexture && xessMotionVectorTexture->resource &&
+				xessMotionVectorTexture->uav && mvFixShader && mvFixCB) {
+
+				float cameraNear = 0.0f, cameraFar = 1.0f;
+				GetCameraNearFar(cameraNear, cameraFar);
+
+				MotionVectorConstants constants{};
+				constants.screenWidth = state.screenWidth;
+				constants.screenHeight = state.screenHeight;
+				constants.renderWidth = renderW;
+				constants.renderHeight = renderH;
+				constants.cameraFar = cameraFar;
+				constants.cameraNear = cameraNear;
+				constants.cameraFarMinusNear = cameraFar - cameraNear;
+				constants.cameraFarTimesNear = cameraFar * cameraNear;
+				ctx->UpdateSubresource(mvFixCB, 0, nullptr, &constants, 0, 0);
+
+				ID3D11ShaderResourceView* mvSRV = reinterpret_cast<ID3D11ShaderResourceView*>(rendererData->renderTargets[RenderTarget::kMotionVectors].srView);
+				ID3D11ShaderResourceView* depthSRV = reinterpret_cast<ID3D11ShaderResourceView*>(rendererData->depthStencilTargets[DepthStencil::kMain].srViewDepth);
+
+				if (mvSRV && depthSRV) {
+					ID3D11ShaderResourceView* srvs[2] = { mvSRV, depthSRV };
+					RunComputePass(ctx, mvFixShader, mvFixCB, srvs, 2, xessMotionVectorTexture->uav,
 						(renderW + 7) / 8, (renderH + 7) / 8);
 				}
 			}
@@ -587,32 +692,32 @@ namespace F4R_AA
 				xessOutputTexture.get(),
 				jitterX, jitterY, renderW, renderH, reset);
 
-if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
+			if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 				xessOutputTexture && xessOutputTexture->srv && rcasShader && rcasCB) {
 
-			float sharpness = settings.fSharpness;
-			if (sharpness < 0.0f) sharpness = 0.0f;
-			if (sharpness > 1.0f) sharpness = 1.0f;
+				float sharpness = settings.fSharpness;
+				if (sharpness < 0.0f) sharpness = 0.0f;
+				if (sharpness > 1.0f) sharpness = 1.0f;
 
-			RCASConstants constants{};
-			constants.sharpness = 0.25f + 0.75f * powf(sharpness, 0.2f);
-			ctx->UpdateSubresource(rcasCB, 0, nullptr, &constants, 0, 0);
+				RCASConstants constants{};
+				constants.sharpness = 0.25f + 0.75f * powf(sharpness, 0.2f);
+				ctx->UpdateSubresource(rcasCB, 0, nullptr, &constants, 0, 0);
 
-			ID3D11ShaderResourceView* srvs[1] = { xessOutputTexture->srv };
-			RunComputePass(ctx, rcasShader, rcasCB, srvs, 1, tempTexture->uav,
-				(state.screenWidth + 7) / 8, (state.screenHeight + 7) / 8);
+				ID3D11ShaderResourceView* srvs[1] = { xessOutputTexture->srv };
+				RunComputePass(ctx, rcasShader, rcasCB, srvs, 1, tempTexture->uav,
+					(state.screenWidth + 7) / 8, (state.screenHeight + 7) / 8);
 
-			ctx->CopyResource(backBufferResource, tempTexture->resource);
-		} else {
-			ctx->CopyResource(backBufferResource, xessOutputTexture->resource);
-		}
+				ctx->CopyResource(backBufferResource, tempTexture->resource);
+			} else {
+				ctx->CopyResource(backBufferResource, xessOutputTexture->resource);
+			}
 		}
 #endif
 
 		backBufferResource->Release();
 	}
 
-	void AntiAliasing::UpdateGameSettings()
+	void Upscaling::UpdateGameSettings()
 	{
 		auto* imageSpaceManager = RE::ImageSpaceManager::GetSingleton();
 		if (imageSpaceManager && imageSpaceManager->effectList[0x11]) {
@@ -625,9 +730,9 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 		*reinterpret_cast<bool*>(enableTAAReloc.GetAddress()) = true;
 	}
 
-	void AntiAliasing::OverrideSamplerStates()
+	void Upscaling::OverrideSamplerStates()
 	{
-		if (!aaEnabled) return;
+		if (!upsclEnabled) return;
 
 		auto* samplerStates = GetGlobalSamplers();
 		if (!samplerStates) return;
@@ -639,9 +744,9 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 		}
 	}
 
-	void AntiAliasing::ResetSamplerStates()
+	void Upscaling::ResetSamplerStates()
 	{
-		if (!aaEnabled) return;
+		if (!upsclEnabled) return;
 
 		auto* samplerStates = GetGlobalSamplers();
 		if (!samplerStates) return;
@@ -651,7 +756,125 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 		}
 	}
 
-	void AntiAliasing::CheckResources()
+	void Upscaling::BuildFlareDepth(RE::BSGraphics::RenderTargetManager& a_rtMgr)
+	{
+		if (!flareDepthShader || !flareDepthCB) return;
+
+		auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
+		if (!rendererData) return;
+		auto* ctx = GetImmediateContext();
+		if (!ctx) return;
+
+		auto& state = RE::BSGraphics::State::GetSingleton();
+		uint32_t renderW = static_cast<uint32_t>(static_cast<float>(state.screenWidth) * GetDynWidthRatio(a_rtMgr));
+		uint32_t renderH = static_cast<uint32_t>(static_cast<float>(state.screenHeight) * GetDynHeightRatio(a_rtMgr));
+		if (renderW < 1) renderW = 1;
+		if (renderH < 1) renderH = 1;
+
+		auto* depthSRV = reinterpret_cast<ID3D11ShaderResourceView*>(rendererData->depthStencilTargets[DepthStencil::kMain].srViewDepth);
+		if (!depthSRV) return;
+
+		if (flareDepthBackup) { PopFlareDepth(); }
+		uint32_t flareNeedW = state.screenWidth;
+		uint32_t flareNeedH = state.screenHeight;
+		bool flareWrongSize = false;
+		if (flareDepthTexture && flareDepthTexture->resource) {
+			D3D11_TEXTURE2D_DESC curDesc = {};
+			flareDepthTexture->resource->GetDesc(&curDesc);
+			if (curDesc.Width != flareNeedW || curDesc.Height != flareNeedH) {
+				flareWrongSize = true;
+			}
+		}
+		if (!flareDepthTexture || flareWrongSize) {
+			flareDepthTexture.reset();
+			flareDepthTexture = std::make_unique<Texture2D>();
+			D3D11_TEXTURE2D_DESC texDesc = {};
+			texDesc.Width = flareNeedW;
+			texDesc.Height = flareNeedH;
+			texDesc.MipLevels = 1;
+			texDesc.ArraySize = 1;
+			texDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			texDesc.SampleDesc.Count = 1;
+			texDesc.Usage = D3D11_USAGE_DEFAULT;
+			texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+			auto* device = GetRenderer();
+			HRESULT hr = device->CreateTexture2D(&texDesc, nullptr, &flareDepthTexture->resource);
+			if (FAILED(hr)) {
+				REX::LogError("Failed to create flareDepthTexture hr=0x{:x}", static_cast<uint32_t>(hr));
+				flareDepthTexture.reset();
+				return;
+			}
+			D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+			srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+			srvDesc.Texture2D.MipLevels = 1;
+			hr = device->CreateShaderResourceView(flareDepthTexture->resource, &srvDesc, &flareDepthTexture->srv);
+			if (FAILED(hr)) {
+				REX::LogError("Failed to create flareDepthTexture SRV hr=0x{:x}", static_cast<uint32_t>(hr));
+				flareDepthTexture.reset();
+				return;
+			}
+			D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+			uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+			uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+			uavDesc.Texture2D.MipSlice = 0;
+			hr = device->CreateUnorderedAccessView(flareDepthTexture->resource, &uavDesc, &flareDepthTexture->uav);
+			if (FAILED(hr)) {
+				REX::LogError("Failed to create flareDepthTexture UAV hr=0x{:x}", static_cast<uint32_t>(hr));
+				flareDepthTexture.reset();
+				return;
+			}
+		}
+
+		float cameraNear = 0.0f, cameraFar = 1.0f;
+		GetCameraNearFar(cameraNear, cameraFar);
+		FlareDepthConstants consts{};
+		consts.targetWidth = state.screenWidth;
+		consts.targetHeight = state.screenHeight;
+		consts.sourceWidth = renderW;
+		consts.sourceHeight = renderH;
+		consts.camFar = cameraFar;
+		consts.camNear = cameraNear;
+		consts.camFarMinusNear = cameraFar - cameraNear;
+		consts.camFarTimesNear = cameraFar * cameraNear;
+		ctx->UpdateSubresource(flareDepthCB, 0, nullptr, &consts, 0, 0);
+
+		ID3D11ShaderResourceView* srvs[1] = { depthSRV };
+		ID3D11UnorderedAccessView* uavs[1] = { flareDepthTexture->uav };
+		ctx->CSSetConstantBuffers(0, 1, &flareDepthCB);
+		ctx->CSSetShaderResources(0, 1, srvs);
+		ctx->CSSetUnorderedAccessViews(0, 1, uavs, nullptr);
+		ctx->CSSetShader(flareDepthShader, nullptr, 0);
+		ctx->Dispatch((state.screenWidth + 7) / 8, (state.screenHeight + 7) / 8, 1);
+
+		ID3D11UnorderedAccessView* nullUAVs[1] = { nullptr };
+		ctx->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
+		ID3D11ShaderResourceView* nullSRVs[1] = { nullptr };
+		ctx->CSSetShaderResources(0, 1, nullSRVs);
+		ctx->CSSetShader(nullptr, nullptr, 0);
+	}
+
+	void Upscaling::PushFlareDepth()
+	{
+		if (!flareDepthTexture || !flareDepthTexture->srv) return;
+		auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
+		if (!rendererData) return;
+		flareDepthBackup = reinterpret_cast<ID3D11ShaderResourceView*>(rendererData->depthStencilTargets[DepthStencil::kMain].srViewDepth);
+		if (flareDepthBackup) flareDepthBackup->AddRef();
+		rendererData->depthStencilTargets[DepthStencil::kMain].srViewDepth = reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(flareDepthTexture->srv);
+	}
+
+	void Upscaling::PopFlareDepth()
+	{
+		if (!flareDepthBackup) return;
+		auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
+		if (!rendererData) return;
+		rendererData->depthStencilTargets[DepthStencil::kMain].srViewDepth = reinterpret_cast<REX::W32::ID3D11ShaderResourceView*>(flareDepthBackup);
+		flareDepthBackup->Release();
+		flareDepthBackup = nullptr;
+	}
+
+	void Upscaling::CheckResources()
 	{
 		auto* rendererData = RE::BSGraphics::RendererData::GetSingleton();
 		auto& state = RE::BSGraphics::State::GetSingleton();
@@ -684,12 +907,12 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 		}
 
 		if (resourcesCreated) {
-			if (cachedWidth == state.screenWidth && cachedHeight == state.screenHeight && cachedFormat == backBufferFormat && cachedMode == settings.iAAMode && cachedSharpness == settings.fSharpness) {
+			if (cachedWidth == state.screenWidth && cachedHeight == state.screenHeight && cachedFormat == backBufferFormat && cachedMethod == settings.iMethod && cachedSharpness == settings.fSharpness && cachedQuality == settings.iQualityMode) {
 				return;
 			}
-			REX::LogInformation("CheckResources - mode/resolution/format/sharpness changed {}x{} fmt{} mode{} sharp{} -> {}x{} fmt{} mode{} sharp{} - recreating",
-				cachedWidth, cachedHeight, static_cast<int>(cachedFormat), cachedMode, cachedSharpness,
-				state.screenWidth, state.screenHeight, static_cast<int>(backBufferFormat), settings.iAAMode, settings.fSharpness);
+			REX::LogInformation("CheckResources: mode/resolution/format/sharpness/quality changed {}x{} fmt{} mode{} sharp{} q{} -> {}x{} fmt{} mode{} sharp{} q{}: recreating",
+				cachedWidth, cachedHeight, static_cast<int>(cachedFormat), cachedMethod, cachedSharpness, cachedQuality,
+				state.screenWidth, state.screenHeight, static_cast<int>(backBufferFormat), settings.iMethod, settings.fSharpness, settings.iQualityMode);
 			motionVectorTexture.reset();
 			tempTexture.reset();
 			workingTexture.reset();
@@ -715,15 +938,19 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 			if (mvFixShader) { mvFixShader->Release(); mvFixShader = nullptr; }
 			if (rcasShader) { rcasShader->Release(); rcasShader = nullptr; }
 			if (depthCopyShader) { depthCopyShader->Release(); depthCopyShader = nullptr; }
+			if (flareDepthCB) { flareDepthCB->Release(); flareDepthCB = nullptr; }
+			if (flareDepthShader) { flareDepthShader->Release(); flareDepthShader = nullptr; }
+			if (flareDepthBackup) { flareDepthBackup->Release(); flareDepthBackup = nullptr; }
+			flareDepthTexture.reset();
 			resourcesCreated = false;
 		}
 
-		const auto mode = static_cast<AAMode>(settings.iAAMode);
+		const auto mode = static_cast<Method>(settings.iMethod);
 
-		REX::LogDebug("CheckResources - creating resources (mode={})", settings.iAAMode);
+		REX::LogDebug("CheckResources: creating resources (method={})", settings.iMethod);
 
 #if F4R_HAS_FSR3
-		if (mode == AAMode::FSR3 && !workingTexture) {
+		if (mode == Method::FSR3 && !workingTexture) {
 			workingTexture = std::make_unique<Texture2D>();
 			D3D11_TEXTURE2D_DESC texDesc = {};
 			texDesc.Width = state.screenWidth;
@@ -745,7 +972,7 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 #endif
 
 #if F4R_HAS_DLSS
-		if (mode == AAMode::DLAA && !workingTexture) {
+		if (mode == Method::DLSS && !workingTexture) {
 			workingTexture = std::make_unique<Texture2D>();
 			D3D11_TEXTURE2D_DESC texDesc = {};
 			texDesc.Width = state.screenWidth;
@@ -779,7 +1006,7 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 
 
 #if F4R_HAS_DLSS
-		if (mode == AAMode::DLAA) {
+		if (mode == Method::DLSS) {
 			if (!motionVectorTexture) {
 				motionVectorTexture = std::make_unique<Texture2D>();
 				D3D11_TEXTURE2D_DESC texDesc = {};
@@ -845,19 +1072,21 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 		}
 #endif
 #if F4R_HAS_FSR3
-		if (mode == AAMode::FSR3) {
+		if (mode == Method::FSR3) {
 			fidelityFX = std::make_unique<FidelityFX>();
 			if (!fidelityFX->CreateFSRResources(
 					device,
 					state.screenWidth, state.screenHeight,
 					backBufferFormat)) {
-				REX::LogError("CheckResources - CreateFSRResources failed");
+				REX::LogError("CheckResources: CreateFSRResources failed");
 				fidelityFX.reset();
+			} else if (g_enbLoaded && settings.iQualityMode >= 1 && settings.iQualityMode <= 3) {
+				REX::LogInformation("ENB forces Native for FSR3");
 			}
 		}
 #endif
 #if F4R_HAS_XESS
-		if (mode == AAMode::XeSS) {
+		if (mode == Method::XeSS) {
 			auto* context = GetImmediateContext();
 			auto& xess = XeSS::GetSingleton();
 			if (!xess.loaded) {
@@ -869,7 +1098,7 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 
 			if (!xess.device) {
 				if (!xess.CreateD3D12(device, context)) {
-					REX::LogError("CheckResources - D3D12 interop failed");
+					REX::LogError("CheckResources: D3D12 interop failed");
 					return;
 				}
 			}
@@ -917,7 +1146,7 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 				}
 			}
 
-			if (settings.fSharpness > 0.0f) {
+			if (settings.fSharpness > 0.0f && (mode == Method::DLSS || mode == Method::XeSS)) {
 				if (!tempTexture) {
 					tempTexture = CreateSharpenTexture(device, width, height, backBufferFormat, typedFormat);
 				}
@@ -933,20 +1162,113 @@ if (settings.fSharpness > 0.0f && tempTexture && tempTexture->uav &&
 				depthCopyShader = CreateComputeShaderFromBytecode(kDepthCopy, kDepthCopySize, device);
 			}
 
+			if (!mvFixCB) {
+				mvFixCB = CreateConstantBuffer(device, "mvFixCB", sizeof(MotionVectorConstants));
+			}
+
+			if (!mvFixShader) {
+				mvFixShader = CreateComputeShaderFromBytecode(kMVFix, kMVFixSize, device);
+			}
+
+			int xessQualityMode = settings.iQualityMode;
+			if (g_enbLoaded && xessQualityMode >= 1 && xessQualityMode <= 3) {
+				xessQualityMode = 0;
+				REX::LogInformation("ENB forces Native for XeSS");
+			}
+
 			if (!xess.initialized) {
-				if (!xess.CreateContext(width, height)) {
-					REX::LogError("CheckResources - CreateContext failed");
+				if (!xess.CreateContext(width, height, xessQualityMode)) {
+					REX::LogError("CheckResources: CreateContext failed");
 					return;
 				}
 			}
 		}
 #endif
 
+		if (currentScale < 0.999f) {
+			if (!flareDepthTexture) {
+				flareDepthTexture = std::make_unique<Texture2D>();
+				D3D11_TEXTURE2D_DESC texDesc = {};
+				texDesc.Width = state.screenWidth;
+				texDesc.Height = state.screenHeight;
+				texDesc.MipLevels = 1;
+				texDesc.ArraySize = 1;
+				texDesc.Format = DXGI_FORMAT_R32_FLOAT;
+				texDesc.SampleDesc.Count = 1;
+				texDesc.Usage = D3D11_USAGE_DEFAULT;
+				texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
+				HRESULT hr = device->CreateTexture2D(&texDesc, nullptr, &flareDepthTexture->resource);
+				if (FAILED(hr)) {
+					REX::LogError("CreateTexture2D(flareDepth) failed hr=0x{:x}", static_cast<uint32_t>(hr));
+					flareDepthTexture.reset();
+				} else {
+					D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
+					srvDesc.Format = DXGI_FORMAT_R32_FLOAT;
+					srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+					srvDesc.Texture2D.MipLevels = 1;
+					hr = device->CreateShaderResourceView(flareDepthTexture->resource, &srvDesc, &flareDepthTexture->srv);
+					if (FAILED(hr)) {
+						REX::LogError("CreateSRV(flareDepth) failed hr=0x{:x}", static_cast<uint32_t>(hr));
+						flareDepthTexture.reset();
+					} else {
+						D3D11_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
+						uavDesc.Format = DXGI_FORMAT_R32_FLOAT;
+						uavDesc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
+						uavDesc.Texture2D.MipSlice = 0;
+						hr = device->CreateUnorderedAccessView(flareDepthTexture->resource, &uavDesc, &flareDepthTexture->uav);
+						if (FAILED(hr)) {
+							REX::LogError("CreateUAV(flareDepth) failed hr=0x{:x}", static_cast<uint32_t>(hr));
+							flareDepthTexture.reset();
+						} else {
+							REX::LogDebug("flareDepthTexture {}x{} R32_FLOAT", texDesc.Width, texDesc.Height);
+						}
+					}
+				}
+			}
+			if (!flareDepthCB) {
+				flareDepthCB = CreateConstantBuffer(device, "flareDepthCB", sizeof(FlareDepthConstants));
+			}
+			if (!flareDepthShader) {
+				flareDepthShader = CreateComputeShaderFromBytecode(kDepthUpscale, kDepthUpscaleSize, device);
+			}
+		} else {
+			if (flareDepthBackup) { PopFlareDepth(); }
+		}
+
 		resourcesCreated = true;
 		cachedWidth = state.screenWidth;
 		cachedHeight = state.screenHeight;
 		cachedFormat = backBufferFormat;
-		cachedMode = settings.iAAMode;
+		cachedMethod = settings.iMethod;
 		cachedSharpness = settings.fSharpness;
+		cachedQuality = settings.iQualityMode;
+		if (settings.iQualityMode >= 1 && settings.iQualityMode <= 3 && settings.iMethod == static_cast<int32_t>(Method::DLSS) && !g_enbLoaded) {
+			float s = 0.6666667f;
+			const char* qname = "Quality";
+			if (settings.iQualityMode == 2) { s = 0.5882353f; qname = "Balanced"; }
+			else if (settings.iQualityMode == 3) { s = 0.5f; qname = "Performance"; }
+			else if (settings.iQualityMode == 1) { qname = "Quality"; }
+			REX::LogInformation("DLSS {}: scale={:.3f} {}x{} -> {}x{}", qname, s, state.screenWidth, state.screenHeight, uint32_t(state.screenWidth * s), uint32_t(state.screenHeight * s));
+		}
+#if F4R_HAS_FSR3
+		if (settings.iQualityMode >= 1 && settings.iQualityMode <= 3 && settings.iMethod == static_cast<int32_t>(Method::FSR3)) {
+			float s = 0.6666667f;
+			const char* qname = "Quality";
+			if (settings.iQualityMode == 2) { s = 0.5882353f; qname = "Balanced"; }
+			else if (settings.iQualityMode == 3) { s = 0.5f; qname = "Performance"; }
+			else if (settings.iQualityMode == 1) { qname = "Quality"; }
+			REX::LogInformation("FSR3 {}: scale={:.3f} {}x{} -> {}x{}", qname, s, state.screenWidth, state.screenHeight, uint32_t(state.screenWidth * s), uint32_t(state.screenHeight * s));
+		}
+#endif
+#if F4R_HAS_XESS
+		if (settings.iQualityMode >= 1 && settings.iQualityMode <= 3 && settings.iMethod == static_cast<int32_t>(Method::XeSS)) {
+			float s = 0.6666667f;
+			const char* qname = "Quality";
+			if (settings.iQualityMode == 2) { s = 0.5882353f; qname = "Balanced"; }
+			else if (settings.iQualityMode == 3) { s = 0.5f; qname = "Performance"; }
+			else if (settings.iQualityMode == 1) { qname = "Quality"; }
+			REX::LogInformation("XeSS {}: scale={:.3f} {}x{} -> {}x{}", qname, s, state.screenWidth, state.screenHeight, uint32_t(state.screenWidth * s), uint32_t(state.screenHeight * s));
+		}
+#endif
 	}
 }

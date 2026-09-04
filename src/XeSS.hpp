@@ -6,7 +6,7 @@
 #include <xess/xess.h>
 #include <xess/xess_d3d12.h>
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	struct XeSS
 	{
@@ -61,7 +61,7 @@ namespace F4R_AA
 
 		bool Load();
 		bool CreateD3D12(ID3D11Device* a_device, ID3D11DeviceContext* a_context);
-		bool CreateContext(uint32_t a_width, uint32_t a_height);
+		bool CreateContext(uint32_t a_width, uint32_t a_height, int a_qualityMode = 0);
 		void Destroy();
 
 		bool CreateSharedTexture(

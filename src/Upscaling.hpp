@@ -6,18 +6,18 @@
 	#include "FidelityFX.hpp"
 #endif
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
-	class AntiAliasing
+	class Upscaling
 	{
 	public:
-		[[nodiscard]] static AntiAliasing& GetSingleton();
+		[[nodiscard]] static Upscaling& GetSingleton();
 
-		AntiAliasing(const AntiAliasing&) = delete;
-		AntiAliasing(AntiAliasing&&) = delete;
-		AntiAliasing& operator=(const AntiAliasing&) = delete;
-		AntiAliasing& operator=(AntiAliasing&&) = delete;
-		~AntiAliasing();
+		Upscaling(const Upscaling&) = delete;
+		Upscaling(Upscaling&&) = delete;
+		Upscaling& operator=(const Upscaling&) = delete;
+		Upscaling& operator=(Upscaling&&) = delete;
+		~Upscaling();
 
 		void Init();
 		void LoadSettings(const std::string& a_iniPath);
@@ -32,11 +32,14 @@ namespace F4R_AA
 
 		void UpdateGameSettings();
 		void CheckResources();
-		void RequestReset();
+        void RequestReset();
+		void BuildFlareDepth(RE::BSGraphics::RenderTargetManager& a_rtMgr);
+		void PushFlareDepth();
+		void PopFlareDepth();
 
 		Settings settings;
 
-		bool aaEnabled = false;
+		bool upsclEnabled = false;
 		bool resetHistory = false;
 
 		std::unique_ptr<Texture2D> workingTexture;
@@ -53,6 +56,11 @@ namespace F4R_AA
 		std::unique_ptr<SharedTexture2D> xessOutputTexture;
 		ID3D11ComputeShader* depthCopyShader = nullptr;
 
+		std::unique_ptr<Texture2D> flareDepthTexture;
+		ID3D11ComputeShader* flareDepthShader = nullptr;
+		ID3D11Buffer* flareDepthCB = nullptr;
+		ID3D11ShaderResourceView* flareDepthBackup = nullptr;
+
 		ID3D11SamplerState* biasedSamplerStates[320]{};
 		ID3D11SamplerState* originalSamplerStates[320]{};
 
@@ -61,20 +69,22 @@ namespace F4R_AA
 
 		float savedWidthRatio = 1.0f;
 		float savedHeightRatio = 1.0f;
+		float currentScale = 1.0f;
 
 #if F4R_HAS_FSR3
 		std::unique_ptr<FidelityFX> fidelityFX;
 #endif
 
-	private:
-		AntiAliasing() = default;
+private:
+		Upscaling() = default;
 
 		bool resourcesCreated = false;
 		uint32_t cachedWidth = 0;
 		uint32_t cachedHeight = 0;
 		DXGI_FORMAT cachedFormat = DXGI_FORMAT_UNKNOWN;
-		int32_t cachedMode = -1;
+		int32_t cachedMethod = -1;
 		float cachedSharpness = -1.0f;
+		int32_t cachedQuality = -1;
 
 		int startupFrameGuard = 0;
 	};

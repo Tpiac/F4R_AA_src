@@ -1,5 +1,5 @@
 #include "PCH.hpp"
-#include "AntiAliasing.hpp"
+#include "Upscaling.hpp"
 #if F4R_HAS_DLSS
 #include "Streamline.hpp"
 #endif
@@ -46,9 +46,13 @@ void ExtractRealD3D11()
 	g_realContext = *(ID3D11DeviceContext**)((char*)wrappedCtx + ctxOffset);
 
 	if (g_realDevice && g_realContext && g_realDevice != wrappedDev) {
+		g_realDevice->AddRef();
+		g_realDevice->Release();
+		g_realContext->AddRef();
+		g_realContext->Release();
 		REX::LogInformation("ENB D3D11 proxy bypassed (dev+0x{:X}, ctx+0x{:X})", devOffset, ctxOffset);
 	} else {
-		REX::LogWarning("ENB bypass failed - offsets may be wrong for this ENB version");
+		REX::LogWarning("ENB bypass failed: offsets may be wrong for this ENB version");
 		g_realDevice = nullptr;
 		g_realContext = nullptr;
 		g_enbExtractionFailed = true;
@@ -99,7 +103,15 @@ namespace
 
 	int32_t GetConfiguredMode()
 	{
-		return GetPrivateProfileIntA("Settings", "iAAMode", F4R_DEFAULT_AAMODE, GetPluginINIPath().c_str());
+#if F4R_HAS_DLSS && !F4R_HAS_FSR3 && !F4R_HAS_XESS
+		return static_cast<int32_t>(F4R_Upscaling::Method::DLSS);
+#elif !F4R_HAS_DLSS && F4R_HAS_FSR3 && !F4R_HAS_XESS
+		return static_cast<int32_t>(F4R_Upscaling::Method::FSR3);
+#elif !F4R_HAS_DLSS && !F4R_HAS_FSR3 && F4R_HAS_XESS
+		return static_cast<int32_t>(F4R_Upscaling::Method::XeSS);
+#else
+		return GetPrivateProfileIntA("Settings", "iMethod", F4R_DEFAULT_Method, GetPluginINIPath().c_str());
+#endif
 	}
 
 	void CreateDefaultINI()
@@ -118,10 +130,9 @@ namespace
 			"; NVIDIA Reflex to reduce game latency\n"
 			"bEnableReflex=0\n"
 			"bReflexBoost=0\n"
-			"; DLSS preset:\n"
-			";   10 = J (Preset J might exhibit slightly less ghosting at the cost of extra flickering. Preset K is generally recommended over preset J)\n"
-			";   11 = K (Default preset for DLAA mode that is transformer based. Best image quality preset at a higher performance cost)\n"
-			"iDLSSPreset=11\n"
+			"; 0 = Native (DLAA, default), 1 = Quality DLSS (0.66x, 1.5x), 2 = Balanced (0.58x, 1.7x), 3 = Performance (0.5x, 2x)\n"
+			"; ENB forces Native\n"
+			"iQualityMode=0\n"
 			"\n"
 			"[Advanced]\n"
 			"; Reflex FPS limiter\n"
@@ -137,6 +148,9 @@ namespace
 			"[Settings]\n"
 			"; RCAS sharpness - 0.0 = no sharpening, 1.0 = max\n"
 			"fSharpness=0.5\n"
+			"; 0 = Native (FSR 1.0x), 1 = Quality (0.66x, 1.5x), 2 = Balanced (0.58x, 1.7x), 3 = Performance (0.5x, 2x)\n"
+			"; ENB forces Native\n"
+			"iQualityMode=0\n"
 			"\n"
 			"[Advanced]\n"
 			"; -0.0001 = default safety net to prevent samplers from being overridden\n"
@@ -144,8 +158,7 @@ namespace
 			"fAnisotropicMipBias=-0.0001\n"
 			"\n"
 			"[ENB]\n"
-			"; ENB D3D11 proxy bypass offsets\n"
-			"; Only change if ENB updates and FSR3 stops working\n"
+			"; ENB D3D11 proxy bypass offsets (FSR3 & XeSS)\n"
 			"DeviceOffset=0x28\n"
 			"ContextOffset=0x6C20\n";
 
@@ -153,21 +166,20 @@ namespace
 
 		std::string content =
 			"[Settings]\n"
-			"; FSR3 - Nvidia & AMD GPU, DLAA - RTX Only, XeSS - Intel & any GPU\n"
-			"; 1 - FSR3, 2 - DLAA, 3 - XeSS, 0 - Off\n"
-			"iAAMode=1\n"
+			"; FSR3 - Nvidia & AMD GPU, DLSS - RTX Only, XeSS - Intel & any GPU\n"
+			"; 1 - FSR3, 2 - DLSS, 3 - XeSS, 0 - Off\n"
+			"iMethod=1\n"
 			"; RCAS sharpness - 0.0 = no sharpening, 1.0 = max\n"
 			"fSharpness=0.5\n"
-			"; NVIDIA Reflex to reduce game latency (DLAA mode only)\n"
+			"; NVIDIA Reflex to reduce game latency (DLSS mode only)\n"
 			"bEnableReflex=0\n"
 			"bReflexBoost=0\n"
-			"; DLSS preset (DLAA mode only):\n"
-			";   10 = J (Preset J might exhibit slightly less ghosting at the cost of extra flickering. Preset K is generally recommended over preset J)\n"
-			";   11 = K (Default preset for DLAA mode that is transformer based. Best image quality preset at a higher performance cost)\n"
-			"iDLSSPreset=11\n"
+			"; 0 = Native (default), 1 = Quality (0.66x, 1.5x), 2 = Balanced (0.58x, 1.7x), 3 = Performance (0.5x, 2x)\n"
+			"; ENB forces Native\n"
+			"iQualityMode=0\n"
 			"\n"
 			"[Advanced]\n"
-			"; Reflex FPS limiter (DLAA mode only)\n"
+			"; Reflex FPS limiter (DLSS mode only)\n"
 			"bReflexUseFPSLimit=0\n"
 			"fReflexFPSLimit=60\n"
 			"; -0.0001 = default safety net to preserve samplers from being overridden\n"
@@ -175,8 +187,7 @@ namespace
 			"fAnisotropicMipBias=-0.0001\n"
 			"\n"
 			"[ENB]\n"
-			"; ENB D3D11 proxy bypass offsets\n"
-			"; Only change if ENB updates and FSR3 stops working\n"
+			"; ENB D3D11 proxy bypass offsets (FSR3 & XeSS)\n"
 			"DeviceOffset=0x28\n"
 			"ContextOffset=0x6C20\n";
 
@@ -197,8 +208,8 @@ namespace
 			{
 				g_enbLoaded = IsENBLoaded();
 				CreateDefaultINI();
-				F4R_AA::AntiAliasing::GetSingleton().LoadSettings(GetPluginINIPath());
-				F4R_AA::AntiAliasing::GetSingleton().Init();
+				F4R_Upscaling::Upscaling::GetSingleton().LoadSettings(GetPluginINIPath());
+				F4R_Upscaling::Upscaling::GetSingleton().Init();
 				break;
 			}
 		default:
@@ -207,9 +218,8 @@ namespace
 	}
 }
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
-#if F4R_HAS_DLSS
 	using D3D11CreateDeviceAndSwapChainFunc = HRESULT(WINAPI*)(
 		IDXGIAdapter*, D3D_DRIVER_TYPE, HMODULE, UINT,
 		const D3D_FEATURE_LEVEL*, UINT, UINT,
@@ -231,6 +241,7 @@ namespace F4R_AA
 			a_featureLevel, a_immediateContext);
 
 		if (SUCCEEDED(hr)) {
+#if F4R_HAS_DLSS
 			auto& streamline = Streamline::GetSingleton();
 			if (streamline.interposer) {
 				streamline.Initialize();
@@ -249,6 +260,7 @@ namespace F4R_AA
 					streamline.PostDevice();
 				}
 			}
+#endif
 		}
 
 		return hr;
@@ -267,7 +279,6 @@ namespace F4R_AA
 		else
 			REX::LogWarning("D3D11CreateDeviceAndSwapChain IAT hook FAILED");
 	}
-#endif
 }
 
 F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
@@ -282,14 +293,17 @@ F4SE_PLUGIN_LOAD(const F4SE::LoadInterface* a_f4se)
 	messaging->RegisterListener(REX::NotNull{ &OnF4SEMessage });
 
 #if F4R_HAS_DLSS
-	if (GetConfiguredMode() == static_cast<int32_t>(F4R_AA::AAMode::DLAA)) {
-		F4R_AA::Streamline::GetSingleton().LoadInterposer();
-		F4R_AA::InstallD3D11Hook();
+	{
+		int32_t mode = GetConfiguredMode();
+		if (mode == static_cast<int32_t>(F4R_Upscaling::Method::DLSS)) {
+			F4R_Upscaling::Streamline::GetSingleton().LoadInterposer();
+			F4R_Upscaling::InstallD3D11Hook();
+		}
 	}
 #endif
 #if F4R_HAS_XESS
-	if (GetConfiguredMode() == static_cast<int32_t>(F4R_AA::AAMode::XeSS)) {
-		F4R_AA::XeSS::GetSingleton().Load();
+	if (GetConfiguredMode() == static_cast<int32_t>(F4R_Upscaling::Method::XeSS)) {
+		F4R_Upscaling::XeSS::GetSingleton().Load();
 	}
 #endif
 

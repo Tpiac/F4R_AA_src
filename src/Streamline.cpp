@@ -1,6 +1,6 @@
 #include "PCH.hpp"
 #include "Streamline.hpp"
-#include "AntiAliasing.hpp"
+#include "Upscaling.hpp"
 
 #include <psapi.h>
 #include <xmmintrin.h>
@@ -9,7 +9,7 @@
 
 #if F4R_HAS_DLSS
 
-namespace F4R_AA
+namespace F4R_Upscaling
 {
 	Streamline& Streamline::GetSingleton()
 	{
@@ -63,10 +63,10 @@ namespace F4R_AA
 
 	void Streamline::Initialize()
 	{
-		REX::LogInformation("Initializing Streamline");
+		REX::LogInformation("Streamline: Initializing");
 
 		if (!interposer) {
-			REX::LogCritical("Initialize failed - interposer not loaded");
+			REX::LogCritical("Streamline: initialize failed interposer not loaded");
 			return;
 		}
 
@@ -122,18 +122,18 @@ namespace F4R_AA
 		sl::Result result = slInit(pref, sl::kSDKVersion);
 		if (result == sl::Result::eOk) {
 			initialized = true;
-			REX::LogInformation("Streamline initialized");
+			REX::LogInformation("Streamline: initialized");
 		} else {
-			REX::LogCritical("Failed to initialize Streamline (result={})", static_cast<int>(result));
+			REX::LogCritical("Streamline: failed to initialize (result={})", static_cast<int>(result));
 		}
 	}
 
 	void Streamline::CheckFeatures(IDXGIAdapter* a_adapter)
 	{
-		REX::LogInformation("Checking features");
+		REX::LogInformation("DLSS: Checking features");
 
 		if (!a_adapter) {
-			REX::LogWarning("CheckFeatures - adapter is null");
+			REX::LogWarning("CheckFeatures: adapter is null");
 			return;
 		}
 
@@ -158,7 +158,7 @@ namespace F4R_AA
 		slIsFeatureLoaded(sl::kFeatureDLSS, featureDLSS);
 
 		if (!featureDLSS) {
-			REX::LogWarning("DLSS feature is not loaded");
+			REX::LogWarning("DLSS: feature not loaded");
 
 			sl::FeatureRequirements req{};
 			sl::Result res = slGetFeatureRequirements(sl::kFeatureDLSS, req);
@@ -168,7 +168,7 @@ namespace F4R_AA
 			return;
 		}
 
-		REX::LogInformation("DLSS feature is loaded");
+		REX::LogInformation("DLSS: feature loaded");
 
 		sl::Result res = slIsFeatureSupported(sl::kFeatureDLSS, adapterInfo);
 		featureDLSS = (res == sl::Result::eOk);
@@ -177,7 +177,7 @@ namespace F4R_AA
 			return;
 		}
 
-		REX::LogInformation("DLSS is available");
+		REX::LogInformation("DLSS: available");
 	}
 
 	void Streamline::PostDevice()
@@ -192,7 +192,7 @@ namespace F4R_AA
 			bool bound = slGetFeatureFunction(sl::kFeatureReflex, "slReflexSetOptions", reinterpret_cast<void*&>(slReflexSetOptions)) == sl::Result::eOk;
 			bound &= slGetFeatureFunction(sl::kFeatureReflex, "slReflexSleep", reinterpret_cast<void*&>(slReflexSleep)) == sl::Result::eOk;
 			featureReflex = bound && slReflexSetOptions && slReflexSleep;
-			REX::LogInformation("NVIDIA Reflex is {}", featureReflex ? "available" : "not available");
+			REX::LogInformation("Streamline: Reflex {}", featureReflex ? "initialized" : "not initialized");
 		}
 	}
 
@@ -248,12 +248,12 @@ namespace F4R_AA
 		constants.cameraPinholeOffset = { 0.0f, 0.0f };
 		constants.depthInverted = sl::Boolean::eFalse;
 		constants.motionVectors3D = sl::Boolean::eFalse;
-		constants.reset = AntiAliasing::GetSingleton().resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
+		constants.reset = Upscaling::GetSingleton().resetHistory ? sl::Boolean::eTrue : sl::Boolean::eFalse;
 		constants.jitterOffset = { -a_jitterX, -a_jitterY };
 		constants.mvecScale = { 1.0f, 1.0f };
 		constants.motionVectorsInvalidValue = 1.1754944e-38f;
 		constants.orthographicProjection = sl::Boolean::eFalse;
-		constants.motionVectorsDilated = sl::Boolean::eTrue;
+		constants.motionVectorsDilated = sl::Boolean::eFalse;
 		constants.motionVectorsJittered = sl::Boolean::eFalse;
 
 		if (!AcquireFrameToken()) {
@@ -292,12 +292,12 @@ namespace F4R_AA
 		if (!initialized || !featureReflex || !slReflexSetOptions || !slReflexSleep)
 			return;
 
-		auto& aa = AntiAliasing::GetSingleton();
+		auto& aa = Upscaling::GetSingleton();
 
 		sl::ReflexMode mode = sl::ReflexMode::eOff;
 		uint32_t frameLimitUs = 0;
 
-		if (aa.settings.bEnableReflex && aa.aaEnabled) {
+		if (aa.settings.bEnableReflex && aa.upsclEnabled) {
 			mode = aa.settings.bReflexBoost ? sl::ReflexMode::eLowLatencyWithBoost : sl::ReflexMode::eLowLatency;
 			if (aa.settings.bReflexUseFPSLimit)
 				frameLimitUs = static_cast<uint32_t>(1000000.0f / aa.settings.fReflexFPSLimit + 0.5f);
@@ -370,16 +370,22 @@ namespace F4R_AA
 				srvDesc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT;
 		}
 
+		sl::DLSSPreset dlaaP = sl::DLSSPreset::ePresetK;
+		sl::DLSSPreset qualP = sl::DLSSPreset::ePresetK;
+		sl::DLSSPreset balP = sl::DLSSPreset::ePresetK;
+		sl::DLSSPreset perfP = sl::DLSSPreset::ePresetK;
+		sl::DLSSPreset ultraP = sl::DLSSPreset::ePresetK;
+
 		sl::DLSSOptions options{};
 		options.mode = mode;
 		options.outputWidth = state.screenWidth;
 		options.outputHeight = state.screenHeight;
 		options.colorBuffersHDR = isHDR ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-		options.dlaaPreset = preset;
-		options.qualityPreset = preset;
-		options.balancedPreset = preset;
-		options.performancePreset = preset;
-		options.ultraPerformancePreset = preset;
+		options.dlaaPreset = dlaaP;
+		options.qualityPreset = qualP;
+		options.balancedPreset = balP;
+		options.performancePreset = perfP;
+		options.ultraPerformancePreset = ultraP;
 
 		sl::Result res = slDLSSSetOptions(viewport, options);
 		if (res != sl::Result::eOk) {
@@ -391,13 +397,18 @@ namespace F4R_AA
 		sl::Resource depth(sl::ResourceType::eTex2d, reinterpret_cast<void*>(rendererData->depthStencilTargets[2].texture));
 		sl::Resource motionVectors(sl::ResourceType::eTex2d, a_motionVectorsResource);
 
-		sl::Extent extent{ 0, 0, a_renderWidth, a_renderHeight };
+		sl::Extent lowExtent{ 0, 0, a_renderWidth, a_renderHeight };
+		sl::Extent fullExtent{ 0, 0, state.screenWidth, state.screenHeight };
+		const bool isQuality = (mode != sl::DLSSMode::eDLAA);
+		const sl::Extent& inputExtent = isQuality ? lowExtent : fullExtent;
+		const sl::Extent& outputExtent = fullExtent;
+		const sl::Extent& vectorExtent = isQuality ? lowExtent : fullExtent;
 
 		sl::ResourceTag tags[] = {
-			sl::ResourceTag(&colorIn, sl::kBufferTypeScalingInputColor, sl::eOnlyValidNow, &extent),
-			sl::ResourceTag(&colorOut, sl::kBufferTypeScalingOutputColor, sl::eOnlyValidNow, &extent),
-			sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::eValidUntilPresent, &extent),
-			sl::ResourceTag(&motionVectors, sl::kBufferTypeMotionVectors, sl::eValidUntilPresent, &extent),
+			sl::ResourceTag(&colorIn, sl::kBufferTypeScalingInputColor, sl::eOnlyValidNow, &inputExtent),
+			sl::ResourceTag(&colorOut, sl::kBufferTypeScalingOutputColor, sl::eOnlyValidNow, &outputExtent),
+			sl::ResourceTag(&depth, sl::kBufferTypeDepth, sl::eValidUntilPresent, &vectorExtent),
+			sl::ResourceTag(&motionVectors, sl::kBufferTypeMotionVectors, sl::eValidUntilPresent, &vectorExtent),
 		};
 
 		if (!slSetTagForFrame) {
@@ -415,6 +426,14 @@ namespace F4R_AA
 		if (res != sl::Result::eOk) {
 			REX::LogError("slEvaluateFeature failed (result={})", static_cast<int>(res));
 		}
+
+		ID3D11Buffer* nullCB = nullptr;
+		ID3D11UnorderedAccessView* nullUAVs[8] = {};
+		ID3D11ShaderResourceView* nullSRVs[16] = {};
+		ctx->CSSetConstantBuffers(0, 1, &nullCB);
+		ctx->CSSetUnorderedAccessViews(0, 8, nullUAVs, nullptr);
+		ctx->CSSetShaderResources(0, 16, nullSRVs);
+		ctx->CSSetShader(nullptr, nullptr, 0);
 	}
 }
 #endif

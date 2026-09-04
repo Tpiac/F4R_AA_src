@@ -1,12 +1,12 @@
-# F4R AA
+# F4R Upscaling
 
-Anti-aliasing mod for Fallout 4 with an use of AI without upscaling options:
+Upscaling mod for Fallout 4:
 
-- DLAA
+- DLSS
 - FSR 3.1.5
 - XeSS
 
-This is the combined development repo and builds F4R_AA.dll, DLAA.dll, FSR3_AA.dll
+This is the combined development repo and builds F4R_Upscaling.dll, DLSS.dll, FSR3.dll
 
 - Fallout 4 (OG/NG/AE)
 - [F4SE](https://f4se.silverlock.org)
@@ -38,14 +38,16 @@ Released under [GPL-3.0-or-later](https://www.gnu.org/licenses/gpl-3.0.html) WIT
 
 Build (combined plugin):
 
-powershell -
-
 $env:VCPKG_ROOT = "C:\path\to\vcpkg"
 cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md
 cmake --build build --config Release
 
-DLAA.dll/FSR3_AA.dll variants can be produced by overriding the plugin name:
+DLSS standalone:
 
-powershell
-cmake -B build_dlaa -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCOMMONLIB_PLUGIN_NAME=DLAA
-cmake --build build_dlaa --config Release
+cmake -B build_dlss -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCOMMONLIB_PLUGIN_NAME=DLSS 
+cmake --build build_dlss --config Release
+
+FSR3 standalone:
+
+cmake -B build_fsr3 -S . -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows-static-md -DCOMMONLIB_PLUGIN_NAME=FSR3
+cmake --build build_fsr3 --config Release
