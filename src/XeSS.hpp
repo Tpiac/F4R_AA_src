@@ -54,6 +54,9 @@ namespace F4R_Upscaling
 		bool initialized = false;
 		bool failed = false;
 
+		float velocityScaleX = 0.0f;
+		float velocityScaleY = 0.0f;
+
 		[[nodiscard]] static XeSS& GetSingleton();
 
 		XeSS(const XeSS&) = delete;

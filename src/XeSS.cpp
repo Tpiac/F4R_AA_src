@@ -213,9 +213,14 @@ namespace F4R_Upscaling
 		}
 
 		xess_quality_settings_t quality = XESS_QUALITY_SETTING_AA;
-		if (a_qualityMode == 1) quality = XESS_QUALITY_SETTING_ULTRA_QUALITY;
+		if (a_qualityMode == 1) quality = XESS_QUALITY_SETTING_QUALITY;
 		else if (a_qualityMode == 2) quality = XESS_QUALITY_SETTING_BALANCED;
 		else if (a_qualityMode == 3) quality = XESS_QUALITY_SETTING_PERFORMANCE;
+
+		float inputScale = 1.0f;
+		if (quality == XESS_QUALITY_SETTING_QUALITY) inputScale = 0.6666667f;
+		else if (quality == XESS_QUALITY_SETTING_BALANCED) inputScale = 0.5882353f;
+		else if (quality == XESS_QUALITY_SETTING_PERFORMANCE) inputScale = 0.5f;
 
 		xess_d3d12_init_params_t params{};
 		params.outputResolution = { a_width, a_height };
@@ -236,7 +241,11 @@ namespace F4R_Upscaling
 		}
 
 		if (xessSetVelocityScale) {
-			xessSetVelocityScale(context, static_cast<float>(a_width), static_cast<float>(a_height));
+			float inputWidthF = static_cast<float>(a_width) * inputScale;
+			float inputHeightF = static_cast<float>(a_height) * inputScale;
+			xessSetVelocityScale(context, inputWidthF, inputHeightF);
+			velocityScaleX = inputWidthF;
+			velocityScaleY = inputHeightF;
 		}
 		if (xessSetJitterScale) {
 			xessSetJitterScale(context, 1.0f, 1.0f);
@@ -333,6 +342,16 @@ namespace F4R_Upscaling
 	{
 		if (!initialized || !a_color || !a_motionVectors || !a_output) return;
 		if (!a_color->resource12 || !a_motionVectors->resource12 || !a_output->resource12) return;
+
+		if (xessSetVelocityScale) {
+			float wantX = static_cast<float>(a_width);
+			float wantY = static_cast<float>(a_height);
+			if (wantX != velocityScaleX || wantY != velocityScaleY) {
+				xessSetVelocityScale(context, wantX, wantY);
+				velocityScaleX = wantX;
+				velocityScaleY = wantY;
+			}
+		}
 
 		uint32_t idx = frameIndex;
 		frameIndex ^= 1;
