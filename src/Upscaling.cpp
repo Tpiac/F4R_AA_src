@@ -340,7 +340,7 @@ namespace F4R_Upscaling
 #endif
 #if F4R_HAS_XESS
 		if (mode == Method::XeSS) {
-			upsclEnabled = true;
+			upsclEnabled = !XeSS::GetSingleton().disabled;
 		}
 #endif
 
@@ -926,6 +926,7 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 			xessOutputTexture.reset();
 			{
 				auto& xess = XeSS::GetSingleton();
+				xess.disabled = false;
 				if (xess.context && xess.xessDestroyContext) {
 					xess.xessDestroyContext(xess.context);
 					xess.context = nullptr;
@@ -1089,16 +1090,36 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 		if (mode == Method::XeSS) {
 			auto* context = GetImmediateContext();
 			auto& xess = XeSS::GetSingleton();
+			auto& rtMgrFb = RE::BSGraphics::RenderTargetManager::GetSingleton();
+			auto fallbackNative = [&](const char* a_reason) {
+				if (!xess.disabled) {
+					REX::LogWarning("XeSS disabled: {} fallback to Native", a_reason);
+					xess.disabled = true;
+				}
+				xess.TeardownD3D12();
+				upsclEnabled = false;
+				currentScale = 1.0f;
+				GetDynWidthRatio(rtMgrFb) = 1.0f;
+				GetDynHeightRatio(rtMgrFb) = 1.0f;
+				GetDynResActivated(rtMgrFb) = false;
+				resetHistory = true;
+			};
+			if (xess.disabled) {
+				fallbackNative("session disabled");
+				return;
+			}
 			if (!xess.loaded) {
 				xess.Load();
 			}
 			if (!xess.loaded) {
+				fallbackNative("libxess unavailable");
 				return;
 			}
 
 			if (!xess.device) {
 				if (!xess.CreateD3D12(device, context)) {
 					REX::LogError("CheckResources: D3D12 interop failed");
+					fallbackNative("D3D12 interop unavailable");
 					return;
 				}
 			}
@@ -1111,6 +1132,7 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 				if (!xess.CreateSharedTexture(xessColorTexture.get(), width, height, backBufferFormat, D3D11_BIND_SHADER_RESOURCE, typedFormat)) {
 					REX::LogError("CreateSharedTexture(color) failed");
 					xessColorTexture.reset();
+					fallbackNative("shared texture creation failed");
 					return;
 				}
 			}
@@ -1120,6 +1142,7 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 				if (!xess.CreateSharedTexture(xessMotionVectorTexture.get(), width, height, DXGI_FORMAT_R16G16_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, DXGI_FORMAT_R16G16_FLOAT, DXGI_FORMAT_R16G16_FLOAT)) {
 					REX::LogError("CreateSharedTexture(motionVector) failed");
 					xessMotionVectorTexture.reset();
+					fallbackNative("shared texture creation failed");
 					return;
 				}
 			}
@@ -1129,6 +1152,7 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 				if (!xess.CreateSharedTexture(xessDepthTexture.get(), width, height, DXGI_FORMAT_R32_FLOAT, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, DXGI_FORMAT_R32_FLOAT, DXGI_FORMAT_R32_FLOAT)) {
 					REX::LogError("CreateSharedTexture(depth) failed");
 					xessDepthTexture.reset();
+					fallbackNative("shared texture creation failed");
 					return;
 				}
 			}
@@ -1142,6 +1166,7 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 				if (!xess.CreateSharedTexture(xessOutputTexture.get(), width, height, backBufferFormat, D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS, typedFormat, uavFormat)) {
 					REX::LogError("CreateSharedTexture(output) failed");
 					xessOutputTexture.reset();
+					fallbackNative("shared texture creation failed");
 					return;
 				}
 			}
@@ -1179,6 +1204,7 @@ if (xessDepthTexture && xessDepthTexture->uav && depthCopyShader) {
 			if (!xess.initialized) {
 				if (!xess.CreateContext(width, height, xessQualityMode)) {
 					REX::LogError("CheckResources: CreateContext failed");
+					fallbackNative("context creation failed");
 					return;
 				}
 			}

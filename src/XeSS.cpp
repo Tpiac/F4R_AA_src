@@ -342,6 +342,9 @@ namespace F4R_Upscaling
 	{
 		if (!initialized || !a_color || !a_motionVectors || !a_output) return;
 		if (!a_color->resource12 || !a_motionVectors->resource12 || !a_output->resource12) return;
+		if (!device || !commandQueue || !context4 || !d3d11Fence || !fence) return;
+		if (!commandAllocators[0] || !commandAllocators[1] || !commandLists[0] || !commandLists[1]) return;
+		if (!xessD3D12Execute) return;
 
 		if (xessSetVelocityScale) {
 			float wantX = static_cast<float>(a_width);
@@ -416,6 +419,25 @@ namespace F4R_Upscaling
 		fenceValue++;
 	}
 
+	void XeSS::TeardownD3D12()
+	{
+		if (fenceEvent) {
+			CloseHandle(fenceEvent);
+			fenceEvent = nullptr;
+		}
+		if (d3d11Fence) { d3d11Fence->Release(); d3d11Fence = nullptr; }
+		if (fence) { fence->Release(); fence = nullptr; }
+		for (uint32_t i = 0; i < 2; i++) {
+			if (commandLists[i]) { commandLists[i]->Release(); commandLists[i] = nullptr; }
+			if (commandAllocators[i]) { commandAllocators[i]->Release(); commandAllocators[i] = nullptr; }
+		}
+		if (commandQueue) { commandQueue->Release(); commandQueue = nullptr; }
+		if (device) { device->Release(); device = nullptr; }
+		if (context4) { context4->Release(); context4 = nullptr; }
+		if (device5) { device5->Release(); device5 = nullptr; }
+		device11 = nullptr;
+	}
+
 	void XeSS::Destroy()
 	{
 		if (context && xessDestroyContext) {
@@ -447,6 +469,9 @@ namespace F4R_Upscaling
 
 		initialized = false;
 		loaded = false;
+		disabled = false;
+		velocityScaleX = 0.0f;
+		velocityScaleY = 0.0f;
 	}
 }
 #endif
