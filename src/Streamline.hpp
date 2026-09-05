@@ -24,8 +24,6 @@ namespace F4R_Upscaling
 		uint32_t reflexFrameLimitUs = 0;
 		uint32_t lastReflexFrame = UINT32_MAX;
 
-		sl::DLSSPreset preset = sl::DLSSPreset::ePresetK;
-
 		PFun_slInit* slInit = nullptr;
 		PFun_slShutdown* slShutdown = nullptr;
 		PFun_slIsFeatureSupported* slIsFeatureSupported = nullptr;

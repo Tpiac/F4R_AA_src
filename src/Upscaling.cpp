@@ -215,9 +215,6 @@ namespace F4R_Upscaling
 		GetPrivateProfileStringA("Settings", "fSharpness", "0.5", buf, sizeof(buf), a_iniPath.c_str());
 		settings.fSharpness = ParseFloat(buf, 0.5f);
 
-		GetPrivateProfileStringA("Settings", "iDLSSPreset", "11", buf, sizeof(buf), a_iniPath.c_str());
-		settings.iDLSSPreset = ParseInt32(buf, 11);
-
 		GetPrivateProfileStringA("Settings", "iQualityMode", "0", buf, sizeof(buf), a_iniPath.c_str());
 		settings.iQualityMode = ParseInt32(buf, 0);
 		if (settings.iQualityMode < 0) settings.iQualityMode = 0;
@@ -227,10 +224,7 @@ namespace F4R_Upscaling
 		settings.fAnisotropicMipBias = ParseFloat(buf, -0.0001f);
 
 #if F4R_HAS_DLSS
-		settings.iDLSSPreset = 11;
-		Streamline::GetSingleton().preset = static_cast<sl::DLSSPreset>(settings.iDLSSPreset);
-
-	GetPrivateProfileStringA("Settings", "bEnableReflex", "1", buf, sizeof(buf), a_iniPath.c_str());
+		GetPrivateProfileStringA("Settings", "bEnableReflex", "1", buf, sizeof(buf), a_iniPath.c_str());
 	settings.bEnableReflex = ParseInt32(buf, 1) != 0;
 
 	GetPrivateProfileStringA("Settings", "bReflexBoost", "0", buf, sizeof(buf), a_iniPath.c_str());

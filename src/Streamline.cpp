@@ -370,22 +370,17 @@ namespace F4R_Upscaling
 				srvDesc.Format == DXGI_FORMAT_R32G32B32A32_FLOAT;
 		}
 
-		sl::DLSSPreset dlaaP = sl::DLSSPreset::ePresetK;
-		sl::DLSSPreset qualP = sl::DLSSPreset::ePresetK;
-		sl::DLSSPreset balP = sl::DLSSPreset::ePresetK;
-		sl::DLSSPreset perfP = sl::DLSSPreset::ePresetK;
-		sl::DLSSPreset ultraP = sl::DLSSPreset::ePresetK;
-
 		sl::DLSSOptions options{};
 		options.mode = mode;
 		options.outputWidth = state.screenWidth;
 		options.outputHeight = state.screenHeight;
 		options.colorBuffersHDR = isHDR ? sl::Boolean::eTrue : sl::Boolean::eFalse;
-		options.dlaaPreset = dlaaP;
-		options.qualityPreset = qualP;
-		options.balancedPreset = balP;
-		options.performancePreset = perfP;
-		options.ultraPerformancePreset = ultraP;
+		options.dlaaPreset = sl::DLSSPreset::ePresetK;
+		options.qualityPreset = sl::DLSSPreset::ePresetK;
+		options.balancedPreset = sl::DLSSPreset::ePresetK;
+		options.performancePreset = sl::DLSSPreset::ePresetK;
+		options.ultraPerformancePreset = sl::DLSSPreset::ePresetK;
+		options.ultraQualityPreset = sl::DLSSPreset::ePresetK;
 
 		sl::Result res = slDLSSSetOptions(viewport, options);
 		if (res != sl::Result::eOk) {

@@ -123,7 +123,6 @@ namespace F4R_Upscaling
 
 		float fSharpness = 0.5f;
 		float fAnisotropicMipBias = -0.0001f;
-		int32_t iDLSSPreset = 11;
 		int32_t iQualityMode = 0;
 
 		bool bEnableReflex = true;
